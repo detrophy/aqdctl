@@ -11,6 +11,7 @@ Requires: python-hidapi. Needs write access to the Octo's hidraw node
 
 import argparse
 import datetime
+import json
 import os
 import struct
 import sys
@@ -86,6 +87,12 @@ RGB_BRIGHTNESS = 0x304
 
 RGB_BASE, RGB_STRIDE, RGB_COUNT = 0x307, 70, 12
 RGB_PORT, RGB_START, RGB_COUNT_OFF, RGB_MODE = 0, 1, 2, 3
+# LEDs addressable on one RGBpx header, per the manual. Both headers count from
+# their own LED 1. (The Farbwerk 360 has the same limit.)
+RGB_MAX_LED = 90
+# The two RGBpx headers. The 12 controllers above are a pool shared between them,
+# not six each: every slot carries its own port byte.
+RGB_CHANNELS = 2
 RGB_SOURCE = 6        # BE16 data source: 0xFFFF none, else 0-based sensor index
 RGB_SOURCE_NONE = 0xFFFF
 RGB_FILTER_RISE = 8   # u8, "filtering of fluctuating values" - rising
@@ -200,6 +207,60 @@ RGB_PALETTE_ROLES = {
     0x0A: ["background", "colour"],
     0x0F: ["background", "colour"],
 }
+
+# Palette SHAPE per effect: (has_background, min_colours, max_colours).
+#
+# Entries are used contiguously from the start. Where an effect has a background
+# it occupies entry 0 and the colours follow. Effects with a 'count' parameter
+# take a variable-length list and 'count' is derived from its length - never
+# typed by hand. Entries past 'count' seen in some captures are leftovers that
+# the official software does not clear.
+#
+# Confirmed on hardware: wave with count=1 fills 2 entries and with count=5 fills
+# 6; colour sequence, which has no background, fills exactly 'count'.
+RGB_PALETTE_SPEC = {
+    0x01: (False, 1, 1),      # static
+    0x02: (False, 1, 1),      # breathing
+    0x04: (True, 1, 5),       # blinking
+    0x05: (False, 1, 6),      # colour change
+    0x07: (True, 1, 5),       # sequence
+    0x08: (True, 2, 2),       # scanner   - background + colour 1 + colour 2
+    0x09: (True, 2, 2),       # laser
+    0x0A: (True, 1, 5),       # wave
+    0x0B: (False, 1, 6),      # colour sequence
+    0x0F: (True, 1, 1),       # rain
+    0x10: (True, 1, 1),       # snowfall
+    0x11: (True, 1, 1),       # stardust
+}
+# Effects absent from the table take no user-settable colours: the rainbow family
+# generates its own, and the audio/ambient ones are driven from the host.
+
+# The 'count' parameter of a variable-length effect is the length of its colour
+# list, so the CLI derives it and never exposes it as a settable parameter.
+RGB_COUNT_PARAM = "count"
+
+# CLI name -> label-report group. The report's own keys are internal shorthand;
+# these are the words used everywhere the user can see, matching the vocabulary
+# of the rest of the tool (a sensor is a sensor, not a "temp").
+NAME_GROUPS = {"fan": "fan", "controller": "led", "sensor": "temp",
+               "flow": "flow", "virtual": "soft"}
+
+# Controller tuning presets. The device stores NO preset identifier - the official
+# software simply writes these five numbers, so a preset here is just a named row.
+# Captured by setting channels 3-6 to each preset in turn, and cross-checked
+# against two channels of an earlier capture that used the same values.
+# Order: P, I, D, reset time (seconds), hysteresis (kelvin).
+PID_PRESETS = {
+    "fastest": (4000, 3500, 1000, 0.5, 0.10),   # Aquasuite "+2"
+    "fast":    (2500, 2000,  500, 1.0, 0.10),   # "+1"
+    "normal":  (1400, 1200,    0, 4.0, 0.20),   # "0", the factory default
+    "slow":    (1000,  800,    0, 8.0, 0.30),   # "-1"
+    "slowest": ( 500,  300,    0, 10.0, 0.30),  # "-2"
+}
+# Aquasuite labels them on a +2..-2 scale; the CLI uses words because a leading
+# '+' or '-' would be parsed as a flag.
+PID_PRESET_SCALE = {"fastest": "+2", "fast": "+1", "normal": "0",
+                    "slow": "-1", "slowest": "-2"}
 FLOW_PULSES = 0x06   # BE16 impulses per litre
 
 # The mode byte is not a small enum: 0x00-0x02 are the three controller types,
@@ -254,9 +315,6 @@ OFF_HYSTERESIS = 0x0E  # BE16, hundredths of a kelvin (20 -> 0.2 K)
 # captured is still valid evidence for this byte.)
 PROFILE_INDEX = 0x65C
 
-PUMP_CHANNELS = {1, 2}
-
-
 def _invoking_user():
     """Under sudo, os.path.expanduser('~') is /root - so backups would land where
     the user cannot see them. Resolve the real invoking account instead."""
@@ -274,6 +332,51 @@ def backup_dir():
     user = _invoking_user()
     home = user.pw_dir if user else os.path.expanduser("~")
     return os.path.join(home, ".local", "share", "octoctl")
+
+
+def config_path():
+    user = _invoking_user()
+    home = user.pw_dir if user else os.path.expanduser("~")
+    return os.path.join(home, ".config", "octoctl", "config.json")
+
+
+def load_config():
+    try:
+        with open(config_path()) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_config(cfg):
+    path = config_path()
+    directory = os.path.dirname(path)
+    fresh = not os.path.isdir(directory)
+    os.makedirs(directory, exist_ok=True)
+    if fresh:
+        _give_back(directory)
+    with open(path, "w") as fh:
+        json.dump(cfg, fh, indent=2, sort_keys=True)
+        fh.write("\n")
+    _give_back(path)
+    return path
+
+
+def protected_channels():
+    """Fan channels the user has asked to be protected from accidental writes.
+
+    Not a device setting - the Octo has no such field - so it lives in the local
+    config. The point is that a pump is a fan header like any other, and a typo
+    that stops one is not recoverable by undoing the command."""
+    raw = load_config().get("protected", [])
+    return {int(c) for c in raw if str(c).isdigit() or isinstance(c, int)}
+
+
+def guard_channel(channel, force):
+    if channel in protected_channels() and not force:
+        sys.exit("Channel %d is protected. Re-run with --force if you mean it, or\n"
+                 "lift the protection with 'octoctl fan set %d protect off'."
+                 % (channel, channel))
 
 
 def _give_back(path):
@@ -443,39 +546,131 @@ def decode(buf):
     return out
 
 
-def print_state(buf):
+def read_hwmon():
+    """Live readings from the kernel driver: {"fan": {1: rpm}, "temp": {1: degC},
+    "flow": litres/hour}. Empty if aquacomputer_d5next is not loaded.
+
+    This is a plain sysfs read, so it needs no root and no USB traffic - the
+    report tells you what the Octo is CONFIGURED to do, this tells you what it is
+    ACTUALLY doing, and having both side by side is usually the question."""
+    import glob
+    path = None
+    for name_file in sorted(glob.glob("/sys/class/hwmon/hwmon*/name")):
+        try:
+            with open(name_file) as fh:
+                if "octo" in fh.read().strip().lower():
+                    path = os.path.dirname(name_file)
+                    break
+        except OSError:
+            continue
+    if path is None:
+        return {}
+
+    def read(leaf, scale=1.0):
+        try:
+            with open(os.path.join(path, leaf)) as fh:
+                return int(fh.read().strip()) / scale
+        except (OSError, ValueError):
+            return None
+
+    out = {"fan": {}, "temp": {}, "flow": None}
+    for ch in range(1, 9):
+        out["fan"][ch] = read("fan%d_input" % ch)
+    for s in range(1, 5):
+        out["temp"][s] = read("temp%d_input" % s, 1000.0)
+    # fan9 is the flow sensor, reported in decilitres per hour.
+    out["flow"] = read("fan9_input", 10.0)
+    return out
+
+
+def pid_preset_name(values):
+    """Name of the preset matching these five numbers, or None. The device stores
+    no preset id, so this is a lookup by value - see PID_PRESETS."""
+    for name, row in PID_PRESETS.items():
+        if all(abs(a - b) < 1e-6 for a, b in zip(values, row)):
+            return name
+    return None
+
+
+def info_fan(buf, names, live):
     st = decode(buf)
-    print("active profile   : %d" % buf[PROFILE_INDEX])
-    print("flow calibration : %d impulses/litre" % st["flow_pulses"])
-    print("sensor offsets   : " + ", ".join("%+.2f" % o for o in st["temp_offsets"]))
-    print()
-    print("ch  mode         setpoint  target  sensor  boost  hold    min     max"
-          "  fallback  chart")
-    print("--  -----------  --------  ------  ------  -----  ----  ------  ------"
-          "  --------  -----")
+    print("FAN CHANNELS  (8 headers)")
+    print("  ch  name             mode         setpoint  target  sensor   rpm"
+          "   boost  hold    min     max  fallback")
+    print("  --  ---------------  -----------  --------  ------  ------  -----"
+          "  -----  ----  ------  ------  --------")
     for c in st["channels"]:
-        pump = "  <- pump" if c["channel"] in PUMP_CHANNELS else ""
-        # the power window and fallback apply to any controller mode; the
-        # target temperature only means something in target-temp mode
-        if c["mode"] in (MODE_TARGET, MODE_CURVE):
+        ch = c["channel"]
+        uses_source = c["mode"] in (MODE_TARGET, MODE_CURVE)
+        if uses_source:
             ctrl = "%6.2f  %6.2f  %8.2f" % (c["min"], c["max"], c["fallback"])
         else:
             ctrl = "     -       -         -"
         target = "%6.2f" % c["target_temp"] if c["mode"] == MODE_TARGET else "     -"
-        uses_source = c["mode"] in (MODE_TARGET, MODE_CURVE)
-        print("%2d  %-11s  %7.2f%%  %s  %6s  %5s  %4s  %s  %5d%s"
-              % (c["channel"], c["mode_name"], c["setpoint"], target,
-                 str(c["source"] + 1) if uses_source else "-",
+        rpm = live.get("fan", {}).get(ch)
+        print("  %2d  %-15s  %-11s  %7.2f%%  %s  %6s  %5s  %5s  %4s  %s"
+              % (ch, (names[ch - 1] or "-")[:15], c["mode_name"], c["setpoint"],
+                 target, source_label(c["source"]) if uses_source else "-",
+                 "-" if rpm is None else "%d" % rpm,
                  "on" if c["boost"] else "off",
-                 "on" if c["hold_min"] else "off", ctrl, c["max_rpm"], pump))
+                 "on" if c["hold_min"] else "off", ctrl))
         if c["mode"] == MODE_CURVE:
-            pts = read_curve(buf, c["channel"])
+            pts = read_curve(buf, ch)
             print("      curve %.1f-%.1fC -> %.1f-%.1f%%   startup %.2fC"
                   % (pts[0][0], pts[-1][0], pts[0][1], pts[-1][1],
-                     be16(buf, channel_base(c["channel"]) + OFF_STARTUP) / 100.0))
+                     be16(buf, channel_base(ch) + OFF_STARTUP) / 100.0))
+        base = channel_base(ch)
+        tuning = (be16(buf, base + OFF_PID_P), be16(buf, base + OFF_PID_I),
+                  be16(buf, base + OFF_PID_D),
+                  be16(buf, base + OFF_PID_RESET) / 10.0,
+                  be16(buf, base + OFF_HYSTERESIS) / 100.0)
+        preset = pid_preset_name(tuning)
+        print("      pid %s  (P %d  I %d  D %d  reset %gs  hysteresis %gK)"
+              % (preset if preset else "custom", tuning[0], tuning[1], tuning[2],
+                 tuning[3], tuning[4]))
     print()
-    print("Note: 'setpoint' is the stored manual speed - it is what hwmon pwmN reads,")
-    print("      and it is only what the channel actually runs at in manual mode.")
+    print("  'setpoint' is the stored fixed speed. It is what hwmon pwmN reads, and")
+    print("  it is only what the channel actually runs at in fixed-power mode.")
+    print("  'chart' maxima are omitted here; see 'fan set <ch> max-rpm'.")
+
+
+def info_rgb(buf, names):
+    print("RGB  (2 headers, 12 controllers shared between them)")
+    print("  function: %s     global brightness: %.0f%% (%d/255)"
+          % ("on" if buf[RGB_ENABLE] == RGB_ENABLE_ON else "off",
+             buf[RGB_BRIGHTNESS] * 100.0 / 255, buf[RGB_BRIGHTNESS]))
+    used = False
+    for i in range(1, RGB_COUNT + 1):
+        if buf[RGB_BASE + RGB_STRIDE * (i - 1) + RGB_MODE] == 0:
+            continue
+        used = True
+        describe_rgb(buf, i, names[i - 1])
+    if not used:
+        print("  no controllers configured")
+    print()
+    print("  A controller is a config slot, not a header: it says \"on channel N,")
+    print("  LEDs A-B, run effect X\". Address one with its channel and position,")
+    print("  e.g. 'rgb set 2 pos 61-79'. The slot number is shown so it lines up")
+    print("  with Aquasuite's \"LED Controller n\" and with 'name controller n'.")
+
+
+def info_sensor(buf, names, live):
+    st = decode(buf)
+    print("SENSORS")
+    print("  n  name             offset    reading")
+    print("  -  ---------------  --------  -------")
+    for i in range(4):
+        value = live.get("temp", {}).get(i + 1)
+        print("  %d  %-15s  %+7.2f  %s"
+              % (i + 1, (names[i] or "-")[:15], st["temp_offsets"][i],
+                 "-" if value is None else "%.2f C" % value))
+    print()
+    flow = live.get("flow")
+    print("  flow: %d impulses/litre    reading: %s"
+          % (st["flow_pulses"], "-" if flow is None else "%.1f l/h" % flow))
+    print()
+    print("  Offsets are stored on the device and survive a reboot; the reading")
+    print("  already has the offset applied.")
 
 
 # ------------------------------------------------------------------- helpers
@@ -511,11 +706,6 @@ def show_diff(before, after):
         print("  0x%03x: %02x -> %02x" % (off, old, new))
     if len(changes) != len(body):
         print("  checksum resealed")
-
-
-def guard_pump(ch, force):
-    if ch in PUMP_CHANNELS and not force:
-        sys.exit("Channel %d is a pump. Refusing without --force-pump." % ch)
 
 
 def read_curve(buf, ch):
@@ -611,11 +801,31 @@ def commit(octo, before, after, args):
 
 # ------------------------------------------------------------------ commands
 
-def cmd_show(octo, args):
-    print_state(octo.read())
+def cmd_info(octo, args):
+    """Everything the device is configured to do, plus what it is doing now."""
+    buf = octo.read()
+    try:
+        labels = decode_labels(octo.read(LABEL_REPORT_ID))
+    except Exception:
+        labels = {g: [""] * n for g, (_, n) in LABEL_GROUPS.items()}
+    live = read_hwmon()
+
+    want = getattr(args, "section", None)
+    sections = [want] if want else ["fan", "rgb", "sensor"]
+
+    print("Octo   active profile %d%s"
+          % (buf[PROFILE_INDEX], "" if live else "   (kernel driver not loaded)"))
+    for i, section in enumerate(sections):
+        print()
+        if section == "fan":
+            info_fan(buf, labels["fan"], live)
+        elif section == "rgb":
+            info_rgb(buf, labels["led"])
+        elif section == "sensor":
+            info_sensor(buf, labels["temp"], live)
 
 
-def cmd_dump(octo, args):
+def cmd_backup(octo, args):
     for rid in (CTRL_REPORT_ID, LABEL_REPORT_ID):
         buf = octo.read(rid)
         target = args.output
@@ -636,12 +846,53 @@ def cmd_restore(octo, args):
     stored, computed = report_crc(saved)
     if stored != computed:
         sys.exit("%s has a bad checksum - refusing to restore it." % args.file)
+    # A restore rewrites the whole report, so it reaches protected channels too.
+    # There is no per-channel version of this, hence the blanket refusal.
+    guarded = protected_channels()
+    if guarded and rid == CTRL_REPORT_ID and not getattr(args, "force", False):
+        sys.exit("Restoring rewrites every channel, including protected channel%s "
+                 "%s.\nRe-run with --force if that is what you want."
+                 % ("" if len(guarded) == 1 else "s",
+                    ", ".join(str(c) for c in sorted(guarded))))
     before = octo.read(rid)
     commit(octo, before, saved, args)
 
 
-def cmd_set(octo, args):
-    """Take manual control of a channel: mode -> manual, write the speed."""
+def parse_sensor(spec):
+    """Turn a --sensor argument into the raw source index the report stores.
+
+    Accepts "1".."4" (temperature channels), "flow", or "#N" for a raw index the
+    tool cannot name - Aquasuite can point a controller at one of the device's
+    software sensors, and those live higher in the same index space."""
+    text = str(spec).strip().lower()
+    if text == "flow":
+        return SOURCE_FLOW
+    if text.startswith("#"):
+        try:
+            return int(text[1:], 0)
+        except ValueError:
+            sys.exit("--sensor #N takes a number, e.g. --sensor '#43'.")
+    try:
+        n = int(text, 0)
+    except ValueError:
+        sys.exit("--sensor takes 1-4, 'flow', or '#N'. Got %r." % spec)
+    if not 1 <= n <= 4:
+        sys.exit("Temperature channels are 1-4. For the flow sensor use "
+                 "--sensor flow; for anything else use --sensor '#%d'." % n)
+    return n - 1
+
+
+def _apply_sensor(after, before, base, spec):
+    """Write a channel's controller source, printing the change."""
+    value = parse_sensor(spec)
+    old = be16(before, base + OFF_SOURCE)
+    put_be16(after, base + OFF_SOURCE, value)
+    if old != value:
+        print("  sensor: %s -> %s" % (source_label(old), source_label(value)))
+
+
+def cmd_mode_fixed(octo, args):
+    """Fixed power: the channel stops regulating and holds the given percentage."""
     before = octo.read()
     after = bytearray(before)
     base = channel_base(args.channel)
@@ -649,41 +900,34 @@ def cmd_set(octo, args):
     after[base + OFF_MODE] = MODE_MANUAL
     put_be16(after, base + OFF_SETPOINT, to_raw_pct(args.percent))
     reseal(after)
+    print("channel %d: %s -> fixed %.2f%%"
+          % (args.channel, mode_name(prev), args.percent))
     if prev == MODE_TARGET:
-        print("Channel %d leaves target-temperature control (target %.2f C)."
-              % (args.channel, be16(before, base + OFF_TARGET) / 100.0))
-        print("Its thermal regulation stops until you run 'mode %d target'."
-              % args.channel)
+        print("  Thermal regulation stops (target was %.2f C). Restore it with"
+              % (be16(before, base + OFF_TARGET) / 100.0))
+        print("  'fan set %d mode target'." % args.channel)
+    elif prev == MODE_CURVE:
+        print("  The curve stays stored but idle. Restore it with")
+        print("  'fan set %d mode curve'." % args.channel)
     commit(octo, before, after, args)
 
 
-def cmd_pin(octo, args):
-    """Hold a channel at a fixed percentage without leaving controller mode,
-    by collapsing its min/max power window."""
-    before = octo.read()
-    base, rec = channel_base(args.channel), record_base(args.channel)
-    if before[base + OFF_MODE] != MODE_TARGET:
-        sys.exit("Channel %d is in %s mode; pin only applies to target-temperature "
-                 "mode. Use 'set' instead."
-                 % (args.channel, mode_name(before[base + OFF_MODE])))
-    print("current window: %.2f%% - %.2f%%  (save these to undo)"
-          % (pct(be16(before, rec + REC_MIN)), pct(be16(before, rec + REC_MAX))))
-    after = bytearray(before)
-    raw = to_raw_pct(args.percent)
-    put_be16(after, rec + REC_MIN, raw)
-    put_be16(after, rec + REC_MAX, raw)
-    reseal(after)
-    commit(octo, before, after, args)
-
-
-def cmd_window(octo, args):
-    """Restore or set a channel's min/max power window."""
+def cmd_limits(octo, args):
+    """Set a channel's minimum and maximum power window."""
     before = octo.read()
     rec = record_base(args.channel)
     after = bytearray(before)
     put_be16(after, rec + REC_MIN, to_raw_pct(args.min))
     put_be16(after, rec + REC_MAX, to_raw_pct(args.max))
     reseal(after)
+    print("channel %d limits: %.2f%%-%.2f%% -> %.2f%%-%.2f%%"
+          % (args.channel, pct(be16(before, rec + REC_MIN)),
+             pct(be16(before, rec + REC_MAX)), args.min, args.max))
+    if args.min == args.max:
+        print("  Equal limits hold the channel at %.2f%% while its controller keeps"
+              % args.min)
+        print("  running - that is how you pin a regulated channel without")
+        print("  switching it to fixed power.")
     commit(octo, before, after, args)
 
 
@@ -763,65 +1007,158 @@ def describe_rgb(buf, index, name):
             print("      colour %d: #%02X%02X%02X%s" % (e, *hsv_to_rgb(h, sat, val), role))
 
 
-def cmd_rgb(octo, args):
-    buf = octo.read()
+# A controller slot as the device leaves it when nothing is configured: mode 0,
+# one LED, no data source, filters at 10/15, both mapping blocks neutral.
+# Taken from the unused slots of a real capture, so removing a controller leaves
+# exactly what the device would have had there anyway.
+RGB_SLOT_EMPTY = bytes.fromhex(
+    "000001000000ffff0a0f00000064006400000064006400" + "00" * 47)
+
+
+def parse_position(text):
+    """'61-79' -> (start, count) with start 1-based inclusive, as shown by the
+    official software. The report stores start 0-based; the caller converts."""
+    part = str(text).split("-")
+    if len(part) != 2:
+        sys.exit("Position is FIRST-LAST, e.g. --pos 1-15 for the first 15 LEDs.")
     try:
-        names = decode_labels(octo.read(LABEL_REPORT_ID))["led"]
-    except Exception:
-        names = ["LED Controller %d" % i for i in range(1, RGB_COUNT + 1)]
+        first, last = int(part[0]), int(part[1])
+    except ValueError:
+        sys.exit("Position is FIRST-LAST, e.g. --pos 1-15 for the first 15 LEDs.")
+    if first < 1:
+        sys.exit("LED positions start at 1.")
+    if last < first:
+        sys.exit("Position %s ends before it starts." % text)
+    if last > RGB_MAX_LED:
+        sys.exit("The last LED on a channel is %d." % RGB_MAX_LED)
+    return first, last - first + 1
 
-    if args.power is not None:
-        want = RGB_ENABLE_ON if args.power == "on" else RGB_ENABLE_OFF
-        after = bytearray(buf)
-        after[RGB_ENABLE] = want
-        reseal(after)
-        print("RGBpx function: %s -> %s"
-              % ("on" if buf[RGB_ENABLE] == RGB_ENABLE_ON else "off", args.power))
-        commit(octo, buf, after, args)
-        return
 
-    if args.brightness is not None:
-        if not 0 <= args.brightness <= 100:
-            sys.exit("Brightness is a percentage, 0-100.")
-        # Aquasuite truncates rather than rounds: its "45" stores 114, not 115.
-        raw = min(255, int(args.brightness * 255 / 100.0))
-        after = bytearray(buf)
-        after[RGB_BRIGHTNESS] = raw
-        reseal(after)
-        print("global brightness: %.1f%% (%d) -> %.1f%% (%d)"
-              % (buf[RGB_BRIGHTNESS] * 100.0 / 255, buf[RGB_BRIGHTNESS],
-                 raw * 100.0 / 255, raw))
-        commit(octo, buf, after, args)
-        return
+def controller_span(buf, index):
+    """(channel, first_led, last_led) of a slot, all 1-based, or None if unused."""
+    base = RGB_BASE + RGB_STRIDE * (index - 1)
+    if buf[base + RGB_MODE] == 0:
+        return None
+    start = buf[base + RGB_START] + 1
+    return (buf[base + RGB_PORT] + 1, start, start + buf[base + RGB_COUNT_OFF] - 1)
 
-    if args.index is None:
-        print("RGBpx function: %s   global brightness: %.1f%% (%d/255)"
-              % ("on" if buf[RGB_ENABLE] == RGB_ENABLE_ON else "off",
-                 buf[RGB_BRIGHTNESS] * 100.0 / 255, buf[RGB_BRIGHTNESS]))
-        for i in range(1, RGB_COUNT + 1):
-            describe_rgb(buf, i, names[i - 1])
-        return
-    if not 1 <= args.index <= RGB_COUNT:
-        sys.exit("Controller must be 1..%d." % RGB_COUNT)
-    if (args.colour is None and args.param is None and args.mode is None
-            and args.source is None and args.filter_rise is None
-            and args.filter_fall is None and not args.flag and not args.no_flag):
-        describe_rgb(buf, args.index, names[args.index - 1])
-        return
 
-    base = RGB_BASE + RGB_STRIDE * (args.index - 1)
+def resolve_controller(buf, channel, first, count):
+    """Which slot a channel+position refers to.
+
+    Exact match wins, so editing an existing controller is the common case. A
+    different controller overlapping the range is refused rather than silently
+    layered - overlapping controllers on one channel is how LEDs end up
+    flickering between two effects. Otherwise the lowest free slot is taken."""
+    last = first + count - 1
+    free = None
+    for i in range(1, RGB_COUNT + 1):
+        span = controller_span(buf, i)
+        if span is None:
+            if free is None:
+                free = i
+            continue
+        ch, lo, hi = span
+        if ch != channel:
+            continue
+        if lo == first and hi == last:
+            return i, False
+        if lo <= last and first <= hi:
+            sys.exit("Controller %d already covers channel %d LEDs %d-%d, which "
+                     "overlaps %d-%d.\nEdit it with '--pos %d-%d', or remove it "
+                     "first with 'rgb remove %d pos %d-%d'."
+                     % (i, ch, lo, hi, first, last, lo, hi, ch, lo, hi))
+    if free is None:
+        sys.exit("All %d controllers are in use. Free one with 'rgb remove'."
+                 % RGB_COUNT)
+    return free, True
+
+
+def cmd_rgb_switch(octo, args):
+    """Turn the whole RGB function on or off."""
+    buf = octo.read()
     after = bytearray(buf)
-    # Apply the mode first: parameter and flag names are per-effect, so setting
-    # "--mode wave --flag reverse" in one go must validate against wave.
-    if args.mode is not None:
-        lookup = {v: k for k, v in RGB_MODES.items()}
-        mode = lookup.get(args.mode, None)
+    after[RGB_ENABLE] = RGB_ENABLE_ON if args.state == "on" else RGB_ENABLE_OFF
+    reseal(after)
+    print("RGB function: %s -> %s"
+          % ("on" if buf[RGB_ENABLE] == RGB_ENABLE_ON else "off", args.state))
+    commit(octo, buf, after, args)
+
+
+def cmd_rgb_brightness(octo, args):
+    """Global brightness for every controller on both channels."""
+    buf = octo.read()
+    if not 0 <= args.percent <= 100:
+        sys.exit("Brightness is a percentage, 0-100.")
+    # Aquasuite truncates rather than rounds: its "45" stores 114, not 115.
+    raw = min(255, int(args.percent * 255 / 100.0))
+    after = bytearray(buf)
+    after[RGB_BRIGHTNESS] = raw
+    reseal(after)
+    print("global brightness: %.0f%% (%d) -> %.0f%% (%d)"
+          % (buf[RGB_BRIGHTNESS] * 100.0 / 255, buf[RGB_BRIGHTNESS],
+             raw * 100.0 / 255, raw))
+    commit(octo, buf, after, args)
+
+
+def cmd_rgb_remove(octo, args):
+    """Clear one controller, or every controller on a channel."""
+    buf = octo.read()
+    after = bytearray(buf)
+    targets = []
+    for i in range(1, RGB_COUNT + 1):
+        span = controller_span(buf, i)
+        if span is None or span[0] != args.channel:
+            continue
+        if args.pos is None:
+            targets.append(i)
+        else:
+            first, count = parse_position(args.pos)
+            if span[1] == first and span[2] == first + count - 1:
+                targets.append(i)
+    if not targets:
+        sys.exit("Nothing to remove on channel %d%s. 'info rgb' lists what is set."
+                 % (args.channel, "" if args.pos is None else " at %s" % args.pos))
+    for i in targets:
+        base = RGB_BASE + RGB_STRIDE * (i - 1)
+        span = controller_span(buf, i)
+        print("removing controller %d (channel %d, LEDs %d-%d)"
+              % (i, span[0], span[1], span[2]))
+        after[base:base + RGB_STRIDE] = RGB_SLOT_EMPTY
+    reseal(after)
+    commit(octo, buf, after, args)
+
+
+def cmd_rgb_set(octo, args):
+    buf = octo.read()
+    first, count = parse_position(args.pos)
+    index, is_new = resolve_controller(buf, args.channel, first, count)
+    print("controller %d (%s) on channel %d, LEDs %d-%d"
+          % (index, "new" if is_new else "existing", args.channel,
+             first, first + count - 1))
+
+    base = RGB_BASE + RGB_STRIDE * (index - 1)
+    after = bytearray(buf)
+    if is_new:
+        after[base:base + RGB_STRIDE] = RGB_SLOT_EMPTY
+        if args.effect is None:
+            sys.exit("A new controller needs an effect: add --effect NAME. "
+                     "'rgb effects' lists them.")
+    after[base + RGB_PORT] = args.channel - 1
+    after[base + RGB_START] = first - 1
+    after[base + RGB_COUNT_OFF] = count
+
+    # Apply the effect first: parameter, flag and colour names are per-effect, so
+    # "--effect wave --flag reverse" in one go must validate against wave.
+    if args.effect is not None:
+        lookup = {v.replace(" ", "_"): k for k, v in RGB_MODES.items()}
+        mode = lookup.get(args.effect.lower().replace(" ", "_"))
         if mode is None:
             try:
-                mode = int(args.mode, 0)
+                mode = int(args.effect, 0)
             except ValueError:
-                sys.exit("Unknown effect %r. Known: %s"
-                         % (args.mode, ", ".join(sorted(lookup))))
+                sys.exit("Unknown effect %r. Run 'octoctl rgb effects' for the list."
+                         % args.effect)
         if mode in RGB_MODES_UNIMPLEMENTED or mode not in RGB_MODES:
             print("Warning: %#04x is not an implemented effect on this firmware." % mode)
             print("         The device stores the byte without validating it, so this")
@@ -835,90 +1172,197 @@ def cmd_rgb(octo, args):
             print("      stores it, but nothing animates without Aquasuite running,")
             print("      so on Linux the channel will simply sit at its background.")
         after[base + RGB_MODE] = mode
-        print("mode: %#04x -> %#04x (%s)"
-              % (buf[base + RGB_MODE], mode, RGB_MODES.get(mode, "?")))
-    if args.source is not None:
-        if args.source.lower() in ("none", "off"):
+        print("  effect: %s -> %s"
+              % (RGB_MODES.get(buf[base + RGB_MODE], "none"),
+                 RGB_MODES.get(mode, "%#04x" % mode)))
+
+    mode = after[base + RGB_MODE]
+
+    if args.sensor is not None:
+        if str(args.sensor).lower() in ("none", "off"):
             value = RGB_SOURCE_NONE
-        elif args.source.lower() == "flow":
-            value = SOURCE_FLOW
         else:
-            n = int(args.source, 0)
-            if not 1 <= n <= 4:
-                print("Note: sensors 1-4 and \"flow\" are confirmed as sources;")
-                print("      other indices are untested.")
-            value = n - 1
-        old = (after[base + RGB_SOURCE] << 8) | after[base + RGB_SOURCE + 1]
-        after[base + RGB_SOURCE] = (value >> 8) & 0xFF
-        after[base + RGB_SOURCE + 1] = value & 0xFF
+            value = parse_sensor(args.sensor)
+        old = be16(after, base + RGB_SOURCE)
+        put_be16(after, base + RGB_SOURCE, value)
+
         def _name(v):
-            return "none" if v == RGB_SOURCE_NONE else "sensor %d" % (v + 1)
-        print("source: %s -> %s" % (_name(old), _name(value)))
+            return "none" if v == RGB_SOURCE_NONE else source_label(v)
+        print("  sensor: %s -> %s" % (_name(old), _name(value)))
         if value != RGB_SOURCE_NONE and old == RGB_SOURCE_NONE:
-            print("      (Aquasuite also rewrites both mapping ranges to 20..70 here;")
-            print("       octoctl leaves them alone - set them yourself if needed.)")
+            print("    Aquasuite also rewrites both mapping ranges to 20-70 here;")
+            print("    octoctl leaves them alone - 'info rgb' shows the current ones.")
     for value, off, label in ((args.filter_rise, RGB_FILTER_RISE, "rise"),
                               (args.filter_fall, RGB_FILTER_FALL, "fall")):
         if value is None:
             continue
         if not 0 <= value <= 255:
             sys.exit("Filter values are a single byte (0-255).")
-        print("filter %s: %d -> %d" % (label, after[base + off], value))
+        print("  filter %s: %d -> %d" % (label, after[base + off], value))
         after[base + off] = value
-    if args.colour is not None:
-        if not 0 <= args.entry < RGB_PALETTE_ENTRIES:
-            sys.exit("Palette entry must be 0..%d." % (RGB_PALETTE_ENTRIES - 1))
-        r, g, b = parse_hex_colour(args.colour)
-        h, sat, val = rgb_to_hsv(r, g, b)
-        o = rgb_entry(args.index, args.entry)
-        after[o], after[o + 1], after[o + 2], after[o + 3] = \
-            (h >> 8) & 0xFF, h & 0xFF, sat, val
-        print("colour %d: #%02X%02X%02X -> #%02X%02X%02X"
-              % (args.entry, *hsv_to_rgb(*read_entry(buf, args.index, args.entry)), r, g, b))
+
+    if args.color is not None or args.background is not None:
+        has_bg, lo, hi = RGB_PALETTE_SPEC.get(mode, (False, 0, 0))
+        effect = RGB_MODES.get(mode, "%#04x" % mode)
+        if hi == 0:
+            sys.exit("Effect '%s' takes no colours of its own. "
+                     "'rgb effects %s' explains what it does accept."
+                     % (effect, effect.replace(" ", "_")))
+        if args.background is not None and not has_bg:
+            sys.exit("Effect '%s' has no background colour." % effect)
+
+        colours = []
+        if args.color is not None:
+            for text in args.color.split(","):
+                colours.append(parse_hex_colour(text.strip()))
+            if not lo <= len(colours) <= hi:
+                sys.exit("Effect '%s' takes %s colour%s, got %d."
+                         % (effect, lo if lo == hi else "%d-%d" % (lo, hi),
+                            "" if hi == 1 else "s", len(colours)))
+
+        entry = 0
+        if has_bg:
+            if args.background is not None:
+                r, g, b = parse_hex_colour(args.background)
+                h, sat, val = rgb_to_hsv(r, g, b)
+                o = rgb_entry(index, 0)
+                after[o], after[o + 1], after[o + 2], after[o + 3] = \
+                    (h >> 8) & 0xFF, h & 0xFF, sat, val
+                print("  background: #%02X%02X%02X" % (r, g, b))
+            entry = 1
+        for n, (r, g, b) in enumerate(colours):
+            h, sat, val = rgb_to_hsv(r, g, b)
+            o = rgb_entry(index, entry + n)
+            after[o], after[o + 1], after[o + 2], after[o + 3] = \
+                (h >> 8) & 0xFF, h & 0xFF, sat, val
+            print("  colour %d: #%02X%02X%02X" % (n + 1, r, g, b))
+        if colours:
+            # Clear the entries past the list: the official software leaves stale
+            # colours behind, and showing them back would be a lie.
+            for e in range(entry + len(colours), RGB_PALETTE_ENTRIES):
+                o = rgb_entry(index, e)
+                after[o:o + 4] = b"\x00\x00\x00\x00"
+            # 'count' is the length of the list, never typed by hand.
+            names = RGB_PARAM_NAMES.get(mode, [])
+            if RGB_COUNT_PARAM in names:
+                set_param(after, base, names.index(RGB_COUNT_PARAM), len(colours))
+
+    labels = RGB_PARAM_NAMES.get(mode, [])
     for spec in (args.param or []):
         if "=" not in spec:
-            sys.exit("--param takes K=VALUE, e.g. --param 0=30")
+            sys.exit("--param takes NAME=VALUE, e.g. --param speed=25. "
+                     "'rgb effects %s' lists the names."
+                     % RGB_MODES.get(mode, "").replace(" ", "_"))
         key, _, raw = spec.partition("=")
-        labels = RGB_PARAM_NAMES.get(after[base + RGB_MODE], [])
-        k = labels.index(key) if key in labels else int(key)
+        key = key.strip()
+        if key == RGB_COUNT_PARAM:
+            sys.exit("'count' is the number of colours, so it comes from --color "
+                     "and is not set by hand.")
+        if key in labels:
+            k = labels.index(key)
+        else:
+            try:
+                k = int(key)
+            except ValueError:
+                sys.exit("Effect '%s' has no parameter %r. Known: %s"
+                         % (RGB_MODES.get(mode, "%#04x" % mode), key,
+                            ", ".join(n for n in labels if n and n != RGB_COUNT_PARAM)
+                            or "none"))
         if not 0 <= k < 9:
-            sys.exit("Parameter index must be 0..8.")
-        value = int(raw)
+            sys.exit("Parameter index must be 0-8.")
+        try:
+            value = int(raw)
+        except ValueError:
+            sys.exit("Parameter %s takes a whole number, got %r." % (key, raw))
         if not 0 <= value <= 0xFFFF:
-            sys.exit("Parameter value must fit in 16 bits.")
-        print("param k%d: %d -> %d" % (k, get_param(buf, base, k), value))
+            sys.exit("Parameter value must fit in 16 bits (0-65535).")
+        print("  %s: %d -> %d" % (key, get_param(buf, base, k), value))
         set_param(after, base, k, value)
+
     for spec, want in [(f, True) for f in (args.flag or [])] + \
                       [(f, False) for f in (args.no_flag or [])]:
-        known = RGB_FLAG_NAMES.get(after[base + RGB_MODE], {})
+        known = RGB_FLAG_NAMES.get(mode, {})
         if spec in RGB_SOURCE_FLAG_NAMES:
             off, bit = RGB_SOURCE_FLAGS, RGB_SOURCE_FLAG_NAMES[spec]
         elif spec in known:
             off, bit = RGB_FLAGS_OFFSET, known[spec]
         else:
-            sys.exit("Effect %#04x has no flag %r. Known: %s"
-                     % (after[base + RGB_MODE], spec,
+            sys.exit("Effect '%s' has no flag %r. Known: %s"
+                     % (RGB_MODES.get(mode, "%#04x" % mode), spec,
                         ", ".join(sorted(set(known) | set(RGB_SOURCE_FLAG_NAMES))) or "none"))
         old = after[base + off]
         after[base + off] = (old | bit) if want else (old & ~bit)
-        print("flag %s: %s -> %s" % (spec, "on" if old & bit else "off",
-                                     "on" if want else "off"))
+        print("  flag %s: %s -> %s" % (spec, "on" if old & bit else "off",
+                                       "on" if want else "off"))
     reseal(after)
     commit(octo, buf, after, args)
 
 
-def cmd_labels(octo, args):
-    buf = octo.read(LABEL_REPORT_ID)
-    for group, names in decode_labels(buf).items():
-        print("%s:" % group)
+def cmd_rgb_effects(octo, args):
+    """Print what each effect accepts. Needs no device.
+
+    Generated from the same tables the writer validates against, so it cannot
+    drift from what the tool will actually let you set."""
+    def describe(mode):
+        name = RGB_MODES[mode]
+        print("%s  (%#04x)" % (name.replace(" ", "_"), mode))
+        if mode in RGB_MODES_HOST_DRIVEN:
+            print("  NOT USABLE ON LINUX: the device stores this effect but the")
+            print("  animation is streamed from an Aquasuite host DLL, so the LEDs")
+            print("  sit at their background with nothing running.")
+        has_bg, lo, hi = RGB_PALETTE_SPEC.get(mode, (False, 0, 0))
+        if hi == 0:
+            print("  colours   : none (the effect generates its own)")
+        else:
+            bits = []
+            if has_bg:
+                bits.append("--background RRGGBB")
+            bits.append("--color %s"
+                        % ",".join(["RRGGBB"] * lo)
+                        + ("[,...up to %d]" % hi if hi > lo else ""))
+            print("  colours   : %s" % "  ".join(bits))
+        names = [n for n in RGB_PARAM_NAMES.get(mode, []) if n and n != RGB_COUNT_PARAM]
+        print("  parameters: %s"
+              % (", ".join("%s=N" % n for n in names) if names else "none"))
+        flags = sorted(RGB_FLAG_NAMES.get(mode, {}))
+        print("  flags     : %s" % (", ".join(flags) if flags else "none"))
+        print("  data source: --sensor 1-4 | flow | none, with --filter-rise /")
+        print("               --filter-fall and source_speed / source_brightness flags")
+
+    if args.effect:
+        lookup = {v.replace(" ", "_"): k for k, v in RGB_MODES.items()}
+        key = args.effect.lower().replace(" ", "_")
+        if key not in lookup:
+            sys.exit("Unknown effect %r. Run 'octoctl rgb effects' for the list."
+                     % args.effect)
+        describe(lookup[key])
+        return
+
+    print("Effects, as stored in the report. Parameter values are whole numbers;")
+    print("most are 0-100 in the official software's sliders.\n")
+    for mode in sorted(RGB_MODES):
+        if mode in RGB_MODES_UNIMPLEMENTED:
+            continue
+        describe(mode)
+        print()
+    print("Not implemented on this firmware, and rejected by 'rgb set': %s"
+          % ", ".join("%#04x" % m for m in sorted(RGB_MODES_UNIMPLEMENTED)))
+
+
+def cmd_name_list(octo, args):
+    """Every name stored on the device, in the groups the CLI uses."""
+    decoded = decode_labels(octo.read(LABEL_REPORT_ID))
+    for cli_group, report_group in NAME_GROUPS.items():
+        names = decoded[report_group]
+        print("%s:" % cli_group)
         for i, name in enumerate(names, 1):
-            print("  %-5s %-2d  %s" % (group, i, name if name else "-"))
+            print("  %-11s %-2d  %s" % (cli_group, i, name if name else "-"))
 
 
-def cmd_label(octo, args):
-    base, count = LABEL_GROUPS[args.group]
+def cmd_name(octo, args):
+    base, count = LABEL_GROUPS[NAME_GROUPS[args.group]]
     if not 1 <= args.index <= count:
-        sys.exit("%s index must be 1..%d." % (args.group, count))
+        sys.exit("%s index must be 1-%d." % (args.group, count))
     buf = octo.read(LABEL_REPORT_ID)
     slot = base + LABEL_SIZE * (args.index - 1)
     current = buf[slot:slot + LABEL_SIZE].split(b"\x00")[0].decode(LABEL_ENCODING, "replace")
@@ -939,20 +1383,23 @@ def cmd_label(octo, args):
     commit(octo, buf, after, args)
 
 
-def cmd_curve(octo, args):
-    before = octo.read()
-    base = channel_base(args.channel)
-    if args.linear is None and args.points is None:
-        if before[base + OFF_MODE] != MODE_CURVE:
-            print("Note: channel %d is in %s mode, so this curve is stored but idle."
-                  % (args.channel, mode_name(before[base + OFF_MODE])))
-        print("  #   temp     power")
-        for i, (t, p) in enumerate(read_curve(before, args.channel), 1):
-            print("  %2d  %5.2fC  %6.2f%%" % (i, t, p))
-        print("  startup temperature: %.2fC"
-              % (be16(before, base + OFF_STARTUP) / 100.0))
-        return
+def cmd_mode_curve(octo, args):
+    """Curve: 16 temperature/power points the channel interpolates between.
 
+    With no points given this just switches the channel into curve mode and
+    prints the 16 points already stored, so you can see what you enabled.
+    Aquasuite's "automatic" and "manual" curve setup write the same 16 points -
+    the automatic dialog only fills them in for you."""
+    before = octo.read()
+    after = bytearray(before)
+    base = channel_base(args.channel)
+    prev = before[base + OFF_MODE]
+    after[base + OFF_MODE] = MODE_CURVE
+    print("channel %d: %s -> curve" % (args.channel, mode_name(prev)))
+
+    points = None
+    if args.linear is not None and args.points is not None:
+        sys.exit("Give either explicit points or --linear, not both.")
     if args.linear is not None:
         t_min, t_max, p_min, p_max = args.linear
         if t_min >= t_max:
@@ -960,36 +1407,72 @@ def cmd_curve(octo, args):
         span = CURVE_POINTS - 1
         points = [(t_min + (t_max - t_min) * i / span,
                    p_min + (p_max - p_min) * i / span) for i in range(CURVE_POINTS)]
-    else:
+    elif args.points is not None:
         try:
             points = [tuple(float(x) for x in pair.split(":"))
                       for pair in args.points.split(",")]
         except ValueError:
-            sys.exit("--points takes TEMP:POWER pairs, e.g. 27:0,28.2:3.3,...")
+            sys.exit("Points are TEMP:POWER pairs, e.g. 27:0,28.2:3.3,...")
         if len(points) != CURVE_POINTS or any(len(pt) != 2 for pt in points):
-            sys.exit("Exactly %d TEMP:POWER points are required." % CURVE_POINTS)
-    for t, p in points:
-        if not 0 <= t <= 150 or not 0 <= p <= 100:
-            sys.exit("Temperatures must be 0-150 C and powers 0-100%.")
-    after = bytearray(before)
-    write_curve(after, args.channel, points)
+            sys.exit("Exactly %d TEMP:POWER points are required (got %d)."
+                     % (CURVE_POINTS, len(points)))
+
+    if points is not None:
+        for t, p in points:
+            if not 0 <= t <= 150 or not 0 <= p <= 100:
+                sys.exit("Temperatures must be 0-150 C and powers 0-100%.")
+        write_curve(after, args.channel, points)
+        print("  curve: %.1f-%.1f C -> %.1f-%.1f%%"
+              % (points[0][0], points[-1][0], points[0][1], points[-1][1]))
+
+    if args.startup is not None:
+        if not 0 <= args.startup <= 150:
+            sys.exit("Startup temperature must be 0-150 C.")
+        print("  startup: %.2f C -> %.2f C"
+              % (be16(before, base + OFF_STARTUP) / 100.0, args.startup))
+        put_be16(after, base + OFF_STARTUP, int(round(args.startup * 100)))
+    if args.sensor is not None:
+        _apply_sensor(after, before, base, args.sensor)
+
     reseal(after)
-    print("curve: %.1f-%.1fC -> %.1f-%.1f%%"
-          % (points[0][0], points[-1][0], points[0][1], points[-1][1]))
+    print("  #   temp     power")
+    for i, (t, p) in enumerate(read_curve(after, args.channel), 1):
+        print("  %2d  %5.2fC  %6.2f%%" % (i, t, p))
+    print("  startup temperature: %.2f C"
+          % (be16(after, base + OFF_STARTUP) / 100.0))
     commit(octo, before, after, args)
 
 
 def cmd_pid(octo, args):
-    """Read or set a channel's controller tuning."""
+    """Read or set a channel's controller tuning.
+
+    The device stores no preset identifier - the official software just writes
+    these five numbers - so --preset is a named row of values, and any explicit
+    flag given alongside it wins."""
     before = octo.read()
     base = channel_base(args.channel)
     fields = (("P", OFF_PID_P, 1.0), ("I", OFF_PID_I, 1.0), ("D", OFF_PID_D, 1.0),
               ("reset", OFF_PID_RESET, 10.0), ("hysteresis", OFF_HYSTERESIS, 100.0))
     given = dict(P=args.p, I=args.i, D=args.d,
                  reset=args.reset, hysteresis=args.hysteresis)
+
+    preset = getattr(args, "preset", None)
+    if preset is not None:
+        row = PID_PRESETS[preset]
+        print("preset %s (Aquasuite %s)" % (preset, PID_PRESET_SCALE[preset]))
+        for (name, _off, _scale), value in zip(fields, row):
+            if given[name] is None:
+                given[name] = value
+
     if all(v is None for v in given.values()):
-        for name, off, scale in fields:
-            print("  %-11s %g" % (name, be16(before, base + off) / scale))
+        current = tuple(be16(before, base + off) / scale for _n, off, scale in fields)
+        match = pid_preset_name(current)
+        print("  channel %d tuning: %s"
+              % (args.channel,
+                 "%s (Aquasuite %s)" % (match, PID_PRESET_SCALE[match])
+                 if match else "custom"))
+        for (name, off, scale), value in zip(fields, current):
+            print("  %-11s %g" % (name, value))
         return
     after = bytearray(before)
     for name, off, scale in fields:
@@ -1022,22 +1505,6 @@ def cmd_boost(octo, args):
     _set_record_flag(octo, args, REC_FLAG_BOOST, "start boost")
 
 
-def cmd_link(octo, args):
-    """Make a channel follow another channel's output."""
-    if args.target == args.channel:
-        sys.exit("A channel cannot follow itself.")
-    before = octo.read()
-    after = bytearray(before)
-    base = channel_base(args.channel)
-    after[base + OFF_MODE] = args.target + LINK_OFFSET
-    reseal(after)
-    print("channel %d: %s -> link->ch%d"
-          % (args.channel, mode_name(before[base + OFF_MODE]), args.target))
-    print("      (Aquasuite also copies the source channel's power window onto the")
-    print("       follower when you do this in the GUI; octoctl only sets the mode.)")
-    commit(octo, before, after, args)
-
-
 def cmd_holdmin(octo, args):
     _set_record_flag(octo, args, REC_FLAG_HOLD_MIN, "hold minimum power")
 
@@ -1060,16 +1527,46 @@ def cmd_maxrpm(octo, args):
     commit(octo, before, after, args)
 
 
-def cmd_target(octo, args):
+def cmd_mode_target(octo, args):
+    """Target temperature: the channel regulates to hold a sensor at a value.
+
+    Both the temperature and the sensor are optional, so this doubles as a plain
+    switch back into target mode with whatever was already configured."""
     before = octo.read()
-    if not 0 <= args.celsius <= 100:
-        sys.exit("Target temperature must be 0-100 C.")
     after = bytearray(before)
     base = channel_base(args.channel)
-    put_be16(after, base + OFF_TARGET, int(round(args.celsius * 100)))
+    prev = before[base + OFF_MODE]
+    after[base + OFF_MODE] = MODE_TARGET
+    print("channel %d: %s -> target temperature" % (args.channel, mode_name(prev)))
+
+    if args.celsius is not None:
+        if not 0 <= args.celsius <= 100:
+            sys.exit("Target temperature must be 0-100 C.")
+        print("  target: %.2f C -> %.2f C"
+              % (be16(before, base + OFF_TARGET) / 100.0, args.celsius))
+        put_be16(after, base + OFF_TARGET, int(round(args.celsius * 100)))
+    else:
+        print("  target: %.2f C (unchanged)"
+              % (be16(before, base + OFF_TARGET) / 100.0))
+    if args.sensor is not None:
+        _apply_sensor(after, before, base, args.sensor)
     reseal(after)
-    print("channel %d target: %.2fC -> %.2fC"
-          % (args.channel, be16(before, base + OFF_TARGET) / 100.0, args.celsius))
+    commit(octo, before, after, args)
+
+
+def cmd_mode_follow(octo, args):
+    """Make a channel follow another channel's output."""
+    if args.target == args.channel:
+        sys.exit("A channel cannot follow itself.")
+    before = octo.read()
+    after = bytearray(before)
+    base = channel_base(args.channel)
+    after[base + OFF_MODE] = args.target + LINK_OFFSET
+    reseal(after)
+    print("channel %d: %s -> follow channel %d"
+          % (args.channel, mode_name(before[base + OFF_MODE]), args.target))
+    print("  Aquasuite also copies the source channel's power window onto the")
+    print("  follower when you do this in the GUI; octoctl only sets the mode.")
     commit(octo, before, after, args)
 
 
@@ -1081,25 +1578,6 @@ def cmd_fallback(octo, args):
     reseal(after)
     print("channel %d fallback: %.2f%% -> %.2f%%"
           % (args.channel, pct(be16(before, rec + REC_FALLBACK)), args.percent))
-    commit(octo, before, after, args)
-
-
-def cmd_fansource(octo, args):
-    """Choose which temperature sensor drives a channel's controller."""
-    before = octo.read()
-    base = channel_base(args.channel)
-    if args.sensor is None:
-        print("channel %d source: sensor %d"
-              % (args.channel, be16(before, base + OFF_SOURCE) + 1))
-        return
-    if not 1 <= args.sensor <= 4:
-        print("Note: only temperature sensors 1-4 are confirmed; higher indices")
-        print("      may address flow or software sensors but are untested.")
-    after = bytearray(before)
-    put_be16(after, base + OFF_SOURCE, args.sensor - 1)
-    reseal(after)
-    print("channel %d source: sensor %d -> sensor %d"
-          % (args.channel, be16(before, base + OFF_SOURCE) + 1, args.sensor))
     commit(octo, before, after, args)
 
 
@@ -1119,29 +1597,42 @@ def cmd_flow(octo, args):
 
 
 def cmd_offset(octo, args):
-    """Read or set a temperature sensor's calibration offset."""
+    """Read or set one temperature sensor's calibration offset."""
     before = octo.read()
+    off = TEMP_OFFSETS + 2 * (args.sensor - 1)
+    current = sbe16(before, off) / 100.0
     if args.celsius is None:
-        for i in range(4):
-            print("sensor %d: %+.2f C" % (i + 1, sbe16(before, TEMP_OFFSETS + 2 * i) / 100.0))
+        print("sensor %d offset: %+.2f C" % (args.sensor, current))
         return
     # the official software and the kernel driver both cap this at +/-15 K
     if not -15.0 <= args.celsius <= 15.0:
         sys.exit("Offset must be within +/-15.00 C.")
     after = bytearray(before)
-    struct.pack_into(">h", after, TEMP_OFFSETS + 2 * (args.sensor - 1),
-                     int(round(args.celsius * 100)))
+    struct.pack_into(">h", after, off, int(round(args.celsius * 100)))
     reseal(after)
+    print("sensor %d offset: %+.2f C -> %+.2f C"
+          % (args.sensor, current, args.celsius))
     commit(octo, before, after, args)
 
 
-def cmd_mode(octo, args):
-    before = octo.read()
-    after = bytearray(before)
-    base = channel_base(args.channel)
-    after[base + OFF_MODE] = MODE_BY_NAME[args.mode]
-    reseal(after)
-    commit(octo, before, after, args)
+def cmd_protect(octo, args):
+    """Mark a fan channel as protected against accidental writes.
+
+    Local setting, not a device one: the Octo has no such field. Protect the
+    headers a pump is on - a typo that stops a pump is not undone by undoing the
+    command."""
+    cfg = load_config()
+    current = protected_channels()
+    if args.state == "on":
+        current.add(args.channel)
+    else:
+        current.discard(args.channel)
+    cfg["protected"] = sorted(current)
+    path = save_config(cfg)
+    print("channel %d protection: %s" % (args.channel, args.state))
+    print("protected channels: %s"
+          % (", ".join(str(c) for c in sorted(current)) if current else "none"))
+    print("stored in %s" % path)
 
 
 UDEV_HELP = """\
@@ -1155,154 +1646,411 @@ Replace wheel with a group you are in.
 """
 
 
-def main():
-    ap = argparse.ArgumentParser(
-        description="Read and modify the Aquacomputer Octo control report.",
-        epilog="Every write is preceded by an automatic backup into "
-               "<your home>/.local/share/octoctl/ (correct under sudo).")
-    ap.add_argument("--help-udev", action="store_true", help="show the udev rule and exit")
-    sub = ap.add_subparsers(dest="cmd")
+# Commands that used to exist, and what replaced them. A clean break is only
+# kind if it says where the command went.
+OLD_COMMANDS = {
+    "show": "info",
+    "dump": "backup",
+    "set": "fan set <ch> mode fixed <percent>",
+    "mode": "fan set <ch> mode fixed|target|curve",
+    "target": "fan set <ch> mode target <celsius>",
+    "fansource": "fan set <ch> mode target --sensor N",
+    "curve": "fan set <ch> mode curve ...",
+    "link": "fan set <ch> mode follow <other-ch>",
+    "window": "fan set <ch> limits <min> <max>",
+    "pin": "fan set <ch> limits <percent> <percent>",
+    "fallback": "fan set <ch> fallback <percent>",
+    "boost": "fan set <ch> boost on|off",
+    "holdmin": "fan set <ch> hold-min on|off",
+    "maxrpm": "fan set <ch> max-rpm <rpm>",
+    "pid": "fan set <ch> pid --preset NAME  (or --p/--i/--d/...)",
+    "labels": "name list",
+    "label": "name <group> <index> [text]",
+    "offset": "sensor offset <1-4> [celsius]",
+    "flow": "sensor flow [impulses]",
+}
 
-    def writer(p):
+EPILOG = """\
+vocabulary
+  channel     a physical header: fan 1-8, rgb 1-2, sensor 1-4
+  controller  one of 12 RGB config slots - "on channel N, LEDs A-B, effect X".
+              Several can sit on one RGB channel; address them by channel and
+              position, not by slot number.
+  position    an LED range on a channel, 1-based and inclusive: 1-15 is the
+              first fifteen LEDs.
+
+examples
+  octoctl info
+  octoctl fan set 3 mode fixed 40
+  octoctl fan set 3 mode curve --linear 30 45 20 100 --sensor 1
+  octoctl fan set 3 pid --preset fast
+  octoctl fan set 1 protect on
+  octoctl rgb set 2 pos 1-15 --effect static --color FF0000
+  octoctl rgb effects wave
+  octoctl name fan 3 "Front Rad"
+
+Every write is preceded by an automatic backup into
+<your home>/.local/share/octoctl/ (correct under sudo)."""
+
+
+def build_parser():
+    ap = argparse.ArgumentParser(
+        prog="octoctl",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="Read and modify the configuration of an Aquacomputer Octo.",
+        epilog=EPILOG)
+    ap.add_argument("--help-udev", action="store_true",
+                    help="show a udev rule that avoids needing root, and exit")
+    sub = ap.add_subparsers(dest="group")
+
+    def writer(p, guarded=False):
+        """Flags common to every command that writes to the device."""
         p.add_argument("-n", "--dry-run", action="store_true",
-                       help="show the byte diff, write nothing")
-        p.add_argument("-y", "--yes", action="store_true", help="skip the confirmation")
-        p.add_argument("--backup", help="path for the pre-write backup")
-        p.add_argument("--force-pump", action="store_true",
-                       help="allow operating on channels 1-2")
+                       help="show the byte diff and write nothing")
+        p.add_argument("-y", "--yes", action="store_true",
+                       help="skip the confirmation prompt")
+        p.add_argument("--backup", metavar="FILE",
+                       help="where to put the pre-write backup")
+        if guarded:
+            p.add_argument("--force", action="store_true",
+                           help="write even if the channel is protected")
+        p.set_defaults(guarded=guarded)
         return p
 
-    sub.add_parser("show", help="decode and print the current configuration")
+    # ---------------------------------------------------------------- info
+    p = sub.add_parser("info", help="show configuration and live readings",
+                       description="Print what the Octo is configured to do and, "
+                                   "if the kernel driver is loaded, what it is "
+                                   "doing right now.")
+    p.add_argument("section", nargs="?", choices=["fan", "rgb", "sensor"],
+                   help="limit the output to one section (default: all three)")
+    p.set_defaults(func=cmd_info)
 
-    p = sub.add_parser("dump", help="save the raw 1631-byte control report")
-    p.add_argument("-o", "--output", help="output file")
+    # ----------------------------------------------------------------- fan
+    fan = sub.add_parser(
+        "fan", formatter_class=argparse.RawDescriptionHelpFormatter,
+        help="fan channels 1-8",
+        description="A fan channel is one of the eight fan headers. Each decides "
+                    "its speed one of four ways (see 'fan set <ch> mode') and has "
+                    "its own power limits, fallback and start behaviour.")
+    fan.set_defaults(_helper=fan)
+    fansub = fan.add_subparsers(dest="fancmd")
+    fset = fansub.add_parser("set", help="change one channel's settings")
+    fset.add_argument("channel", type=int, choices=range(1, 9), metavar="CHANNEL",
+                      help="fan header, 1-8")
+    fset.set_defaults(_helper=fset)
+    what = fset.add_subparsers(dest="what")
 
-    p = writer(sub.add_parser("restore", help="write a saved control report back"))
-    p.add_argument("file")
+    mode = what.add_parser(
+        "mode", formatter_class=argparse.RawDescriptionHelpFormatter,
+        help="how the channel decides its speed",
+        description="How the channel decides its speed. Whatever you do not "
+                    "mention keeps its stored value, so 'mode target' with no "
+                    "arguments just switches back into target mode.")
+    mode.set_defaults(_helper=mode)
+    modesub = mode.add_subparsers(dest="mode")
 
-    p = writer(sub.add_parser("set", help="manual mode + fixed speed on a channel"))
-    p.add_argument("channel", type=int, choices=range(1, 9))
-    p.add_argument("percent", type=float)
+    p = writer(modesub.add_parser(
+        "fixed", help="hold a constant power, no regulation",
+        epilog="example:  octoctl fan set 3 mode fixed 40",
+        formatter_class=argparse.RawDescriptionHelpFormatter), guarded=True)
+    p.add_argument("percent", type=float, metavar="PERCENT",
+                   help="power to hold, 0-100")
+    p.set_defaults(func=cmd_mode_fixed)
+
+    p = writer(modesub.add_parser(
+        "target", help="regulate to hold a sensor at a temperature",
+        epilog="example:  octoctl fan set 3 mode target 36 --sensor 1",
+        formatter_class=argparse.RawDescriptionHelpFormatter), guarded=True)
+    p.add_argument("celsius", type=float, nargs="?", metavar="CELSIUS",
+                   help="temperature to hold, 0-100 C (default: keep current)")
+    p.add_argument("--sensor", metavar="S",
+                   help="which sensor drives it: 1-4, 'flow', or '#N' for a raw index")
+    p.set_defaults(func=cmd_mode_target)
+
+    p = writer(modesub.add_parser(
+        "curve", help="follow a 16-point temperature/power curve",
+        epilog="examples:\n"
+               "  octoctl fan set 7 mode curve --linear 30 45 20 100\n"
+               "  octoctl fan set 7 mode curve 30:20,31:25,...  (16 pairs)\n"
+               "  octoctl fan set 7 mode curve                  (switch back, show it)",
+        formatter_class=argparse.RawDescriptionHelpFormatter), guarded=True)
+    p.add_argument("points", nargs="?", metavar="POINTS",
+                   help="16 TEMP:POWER pairs, comma separated, e.g. 27:0,28.2:3.3,...")
+    p.add_argument("--linear", nargs=4, type=float, metavar=("TMIN", "TMAX", "PMIN", "PMAX"),
+                   help="generate the 16 points as a straight line between two "
+                        "temperatures (C) and two powers (%%)")
+    p.add_argument("--startup", type=float, metavar="CELSIUS",
+                   help="startup temperature, 0-150 C")
+    p.add_argument("--sensor", metavar="S",
+                   help="which sensor drives it: 1-4, 'flow', or '#N' for a raw index")
+    p.set_defaults(func=cmd_mode_curve)
+
+    p = writer(modesub.add_parser(
+        "follow", help="copy another channel's output",
+        epilog="example:  octoctl fan set 6 mode follow 3",
+        formatter_class=argparse.RawDescriptionHelpFormatter), guarded=True)
+    p.add_argument("target", type=int, choices=range(1, 9), metavar="CHANNEL",
+                   help="the channel to follow, 1-8")
+    p.set_defaults(func=cmd_mode_follow)
+
+    p = writer(what.add_parser(
+        "limits", help="minimum and maximum power the channel may use",
+        epilog="Equal values pin the channel while its controller keeps running.\n"
+               "example:  octoctl fan set 3 limits 25 80",
+        formatter_class=argparse.RawDescriptionHelpFormatter), guarded=True)
+    p.add_argument("min", type=float, metavar="MIN", help="minimum power, 0-100 %%")
+    p.add_argument("max", type=float, metavar="MAX", help="maximum power, 0-100 %%")
+    p.set_defaults(func=cmd_limits)
+
+    p = writer(what.add_parser(
+        "fallback", help="power used when the sensor reads nothing",
+        epilog="example:  octoctl fan set 3 fallback 50",
+        formatter_class=argparse.RawDescriptionHelpFormatter), guarded=True)
+    p.add_argument("percent", type=float, metavar="PERCENT", help="power, 0-100 %%")
+    p.set_defaults(func=cmd_fallback)
+
+    p = writer(what.add_parser(
+        "boost", help="brief full power when starting from a standstill"), guarded=True)
+    p.add_argument("state", choices=["on", "off"])
+    p.set_defaults(func=cmd_boost)
+
+    p = writer(what.add_parser(
+        "hold-min", help="keep running at the minimum instead of stopping"), guarded=True)
+    p.add_argument("state", choices=["on", "off"])
+    p.set_defaults(func=cmd_holdmin)
+
+    p = writer(what.add_parser(
+        "max-rpm", help="full-scale rpm for the bar graph and chart"), guarded=True)
+    p.add_argument("rpm", type=int, nargs="?", metavar="RPM",
+                   help="full-scale value, 0-65535 (omit to read)")
+    p.set_defaults(func=cmd_maxrpm)
+
+    p = writer(what.add_parser(
+        "pid", formatter_class=argparse.RawDescriptionHelpFormatter,
+        help="controller tuning",
+        description="Controller tuning. The device stores no preset identifier - "
+                    "the official software just writes these five numbers - so "
+                    "--preset is a named set of them and any explicit flag wins.",
+        epilog="presets           P     I     D   reset  hysteresis\n"
+               "  fastest (+2)  4000  3500  1000   0.5s     0.10 K\n"
+               "  fast    (+1)  2500  2000   500   1.0s     0.10 K\n"
+               "  normal   (0)  1400  1200     0   4.0s     0.20 K\n"
+               "  slow    (-1)  1000   800     0   8.0s     0.30 K\n"
+               "  slowest (-2)   500   300     0  10.0s     0.30 K\n\n"
+               "examples:\n"
+               "  octoctl fan set 5 pid              (read)\n"
+               "  octoctl fan set 5 pid --preset fast\n"
+               "  octoctl fan set 5 pid --preset fast --d 600"), guarded=True)
+    p.add_argument("--preset", choices=sorted(PID_PRESETS),
+                   help="a named tuning; explicit flags below override it")
+    p.add_argument("--p", type=float, metavar="V", help="proportional factor")
+    p.add_argument("--i", type=float, metavar="V", help="integral factor")
+    p.add_argument("--d", type=float, metavar="V", help="derivative factor")
+    p.add_argument("--reset", type=float, metavar="SECONDS", help="reset time")
+    p.add_argument("--hysteresis", type=float, metavar="KELVIN", help="in kelvin")
+    p.set_defaults(func=cmd_pid)
+
+    p = what.add_parser(
+        "protect", formatter_class=argparse.RawDescriptionHelpFormatter,
+        help="refuse writes to this channel unless --force",
+        description="Guard a channel against accidental writes. Local setting - "
+                    "the Octo has no such field - so it costs nothing on the "
+                    "device. Use it on the headers your pumps are on: a typo that "
+                    "stops a pump is not undone by undoing the command.",
+        epilog="example:  octoctl fan set 1 protect on")
+    p.add_argument("state", choices=["on", "off"])
+    p.set_defaults(func=cmd_protect, needs_device=False)
+
+    # ----------------------------------------------------------------- rgb
+    rgb = sub.add_parser(
+        "rgb", formatter_class=argparse.RawDescriptionHelpFormatter,
+        help="RGB channels 1-2",
+        description="An RGB channel is one of the two RGBpx headers. A controller "
+                    "is one of 12 config slots saying \"on channel N, LEDs A-B, "
+                    "run effect X\"; several can sit on one channel. You address "
+                    "them by channel and position - the tool picks the slot.")
+    rgb.set_defaults(_helper=rgb)
+    rgbsub = rgb.add_subparsers(dest="rgbcmd")
+
+    p = writer(rgbsub.add_parser(
+        "set", formatter_class=argparse.RawDescriptionHelpFormatter,
+        help="configure a stretch of LEDs on a channel",
+        description="Configure the LEDs at a position on a channel. If a "
+                    "controller already covers exactly that range it is edited; "
+                    "otherwise a free slot is used. An overlapping range is "
+                    "refused rather than layered.",
+        epilog="Colours are per-effect - run 'octoctl rgb effects NAME' to see\n"
+               "what one accepts. Positions are 1-based and inclusive.\n\n"
+               "examples:\n"
+               "  octoctl rgb set 2 pos 1-15 --effect static --color FF0000\n"
+               "  octoctl rgb set 2 pos 61-79 --effect wave --background 0A0A0A \\\n"
+               "                              --color FF0000,00FF00 --param speed=25\n"
+               "  octoctl rgb set 1 pos 1-28 --sensor 1 --flag source_brightness"))
+    p.add_argument("channel", type=int, choices=range(1, RGB_CHANNELS + 1),
+                   metavar="CHANNEL", help="RGBpx header, 1-%d" % RGB_CHANNELS)
+    p.add_argument("pos_kw", metavar="pos", choices=["pos"], help="the word 'pos'")
+    p.add_argument("pos", metavar="FIRST-LAST",
+                   help="LED range on this channel, 1-based inclusive, e.g. 1-15")
+    p.add_argument("--effect", metavar="NAME",
+                   help="effect name; 'rgb effects' lists them")
+    p.add_argument("--color", metavar="RRGGBB[,RRGGBB...]",
+                   help="the effect's colours, in role order")
+    p.add_argument("--background", metavar="RRGGBB",
+                   help="background colour, for effects that have one")
+    p.add_argument("--param", action="append", metavar="NAME=VALUE",
+                   help="an effect parameter, repeatable, e.g. --param speed=25")
+    p.add_argument("--flag", action="append", metavar="NAME",
+                   help="turn a flag on, repeatable, e.g. --flag reverse")
+    p.add_argument("--no-flag", action="append", dest="no_flag", metavar="NAME",
+                   help="turn a flag off, repeatable")
+    p.add_argument("--sensor", metavar="S",
+                   help="drive the effect from a sensor: 1-4, 'flow', '#N', or 'none'")
+    p.add_argument("--filter-rise", type=int, dest="filter_rise", metavar="N",
+                   help="damping for rising sensor values, 0-255")
+    p.add_argument("--filter-fall", type=int, dest="filter_fall", metavar="N",
+                   help="damping for falling sensor values, 0-255")
+    p.set_defaults(func=cmd_rgb_set)
+
+    p = writer(rgbsub.add_parser(
+        "remove", formatter_class=argparse.RawDescriptionHelpFormatter,
+        help="clear a controller, or a whole channel",
+        epilog="examples:\n"
+               "  octoctl rgb remove 2 pos 61-79   (one controller)\n"
+               "  octoctl rgb remove 2             (every controller on channel 2)"))
+    p.add_argument("channel", type=int, choices=range(1, RGB_CHANNELS + 1),
+                   metavar="CHANNEL", help="RGBpx header, 1-%d" % RGB_CHANNELS)
+    p.add_argument("pos_kw", metavar="pos", nargs="?", choices=["pos", None],
+                   help="the word 'pos'")
+    p.add_argument("pos", metavar="FIRST-LAST", nargs="?",
+                   help="LED range to clear (omit to clear the whole channel)")
+    p.set_defaults(func=cmd_rgb_remove)
+
+    p = writer(rgbsub.add_parser("switch", help="turn the whole RGB function on or off"))
+    p.add_argument("state", choices=["on", "off"])
+    p.set_defaults(func=cmd_rgb_switch)
+
+    p = writer(rgbsub.add_parser("brightness",
+                                 help="global brightness for both channels"))
+    p.add_argument("percent", type=float, metavar="PERCENT", help="0-100")
+    p.set_defaults(func=cmd_rgb_brightness)
+
+    p = rgbsub.add_parser("effects", help="what each effect accepts",
+                          description="Print the colours, parameters and flags "
+                                      "each effect takes. Needs no device.")
+    p.add_argument("effect", nargs="?", metavar="NAME",
+                   help="one effect (omit for all of them)")
+    p.set_defaults(func=cmd_rgb_effects, needs_device=False)
+
+    # ---------------------------------------------------------------- name
+    name = sub.add_parser(
+        "name", formatter_class=argparse.RawDescriptionHelpFormatter,
+        help="names stored on the device",
+        description="The Octo stores 42 names and shows them in the official "
+                    "software. Groups: fan (8), controller (12), sensor (4), "
+                    "flow (2), virtual (16, the device's software sensors).")
+    name.set_defaults(_helper=name)
+    namesub = name.add_subparsers(dest="namegroup")
+    p = namesub.add_parser("list", help="every stored name")
+    p.set_defaults(func=cmd_name_list)
+
+    for group, (_base, count) in ((g, LABEL_GROUPS[NAME_GROUPS[g]])
+                                  for g in sorted(NAME_GROUPS)):
+        p = writer(namesub.add_parser(
+            group, formatter_class=argparse.RawDescriptionHelpFormatter,
+            help="%s names (1-%d)" % (group, count),
+            epilog="Names are single-byte text (latin-1), up to %d characters.\n\n"
+                   "examples:\n"
+                   "  octoctl name %s 1 \"Wasser\"\n"
+                   "  octoctl name %s 1            (read it)"
+                   % (LABEL_MAX, group, group)))
+        p.add_argument("index", type=int, choices=range(1, count + 1),
+                       metavar="INDEX", help="1-%d" % count)
+        p.add_argument("text", nargs="?", help="the new name (omit to read)")
+        p.set_defaults(func=cmd_name, group=group)
+
+    # -------------------------------------------------------------- sensor
+    sensor = sub.add_parser(
+        "sensor", formatter_class=argparse.RawDescriptionHelpFormatter,
+        help="temperature sensors and the flow meter",
+        description="The four temperature headers, and the single flow header.")
+    sensor.set_defaults(_helper=sensor)
+    sensorsub = sensor.add_subparsers(dest="sensorcmd")
+
+    p = writer(sensorsub.add_parser(
+        "offset", formatter_class=argparse.RawDescriptionHelpFormatter,
+        help="calibration offset for one sensor",
+        epilog="Stored on the device and applied to its readings.\n\n"
+               "examples:\n"
+               "  octoctl sensor offset 1 -0.6\n"
+               "  octoctl sensor offset 1        (read it)"))
+    p.add_argument("sensor", type=int, choices=range(1, 5), metavar="SENSOR",
+                   help="temperature header, 1-4")
+    p.add_argument("celsius", type=float, nargs="?", metavar="CELSIUS",
+                   help="offset in degrees, -15.00 to +15.00 (omit to read)")
+    p.set_defaults(func=cmd_offset)
+
+    p = writer(sensorsub.add_parser(
+        "flow", formatter_class=argparse.RawDescriptionHelpFormatter,
+        help="flow meter calibration",
+        description="The Octo has one flow header, so this takes no index.",
+        epilog="example:  octoctl sensor flow 169"))
+    p.add_argument("impulses", type=int, nargs="?", metavar="IMPULSES",
+                   help="impulses per litre, 10-1000 (omit to read)")
+    p.set_defaults(func=cmd_flow)
+
+    # ------------------------------------------------------ backup/restore
+    p = sub.add_parser("backup", help="save the raw reports to a file",
+                       description="Write both feature reports to disk, byte for "
+                                   "byte, so 'restore' can put them back.")
+    p.add_argument("-o", "--output", metavar="FILE", help="output file")
+    p.set_defaults(func=cmd_backup)
 
     p = writer(sub.add_parser(
-        "pin", help="hold a channel at a fixed %% while staying under its controller"))
-    p.add_argument("channel", type=int, choices=range(1, 9))
-    p.add_argument("percent", type=float)
+        "restore", help="write a saved report back to the device",
+        description="Restore a file written by 'backup'. The checksum is checked "
+                    "before anything is sent. This rewrites every channel, so it "
+                    "is refused while any channel is protected."), guarded=True)
+    p.add_argument("file", metavar="FILE")
+    p.set_defaults(func=cmd_restore)
 
-    p = writer(sub.add_parser("window", help="set a channel's min/max power window"))
-    p.add_argument("channel", type=int, choices=range(1, 9))
-    p.add_argument("min", type=float)
-    p.add_argument("max", type=float)
+    return ap
 
-    p = writer(sub.add_parser("rgb", help="read or set an RGBpx controller colour"))
-    p.add_argument("index", type=int, nargs="?", default=None)
-    p.add_argument("colour", nargs="?", default=None, help="RRGGBB, e.g. FF0000")
-    p.add_argument("--entry", type=int, default=0,
-                   help="palette entry: 0 background, 1 effect colour")
-    p.add_argument("--param", action="append",
-                   help="K=VALUE or NAME=VALUE, e.g. speed=30 (repeatable)")
-    p.add_argument("--mode", help="effect name or id, e.g. wave / 0x0a")
-    p.add_argument("--power", choices=["on", "off"],
-                   help="turn the whole RGBpx function on or off")
-    p.add_argument("--brightness", type=float, default=None,
-                   help="global RGBpx brightness, 0-100%%")
-    p.add_argument("--source",
-                   help="data source: none, flow, or sensor number 1-4")
-    p.add_argument("--filter-rise", type=int, dest="filter_rise",
-                   help="filtering of fluctuating values, rising (0-255)")
-    p.add_argument("--filter-fall", type=int, dest="filter_fall",
-                   help="filtering of fluctuating values, falling (0-255)")
-    p.add_argument("--flag", action="append", help="turn a flag on, e.g. --flag fade")
-    p.add_argument("--no-flag", action="append", dest="no_flag",
-                   help="turn a flag off")
 
-    sub.add_parser("labels", help="list every name stored on the device")
+def main():
+    argv = sys.argv[1:]
+    if argv and argv[0] in OLD_COMMANDS:
+        sys.exit("'%s' no longer exists. Use:\n  octoctl %s\n\n"
+                 "The commands are grouped now - run 'octoctl --help'."
+                 % (argv[0], OLD_COMMANDS[argv[0]]))
 
-    p = writer(sub.add_parser("label", help="read or set one stored name"))
-    p.add_argument("group", choices=sorted(LABEL_GROUPS))
-    p.add_argument("index", type=int)
-    p.add_argument("text", nargs="?", default=None)
-
-    p = writer(sub.add_parser("offset", help="read or set sensor calibration offsets"))
-    p.add_argument("sensor", type=int, nargs="?", default=1, choices=range(1, 5))
-    p.add_argument("celsius", type=float, nargs="?", default=None)
-
-    p = writer(sub.add_parser("mode", help="switch a channel's control mode"))
-    p.add_argument("channel", type=int, choices=range(1, 9))
-    p.add_argument("mode", choices=["manual", "target", "curve"])
-
-    p = writer(sub.add_parser("curve", help="read or set a channel's 16-point curve"))
-    p.add_argument("channel", type=int, choices=range(1, 9))
-    p.add_argument("--linear", nargs=4, type=float,
-                   metavar=("TMIN", "TMAX", "PMIN", "PMAX"),
-                   help="fill 16 evenly spaced points on a straight line")
-    p.add_argument("--points", help="16 explicit TEMP:POWER pairs, comma separated")
-
-    p = writer(sub.add_parser("target", help="set a channel's target temperature"))
-    p.add_argument("channel", type=int, choices=range(1, 9))
-    p.add_argument("celsius", type=float)
-
-    p = writer(sub.add_parser("fallback", help="set a channel's fallback power"))
-    p.add_argument("channel", type=int, choices=range(1, 9))
-    p.add_argument("percent", type=float)
-
-    p = writer(sub.add_parser("pid", help="read or set controller tuning"))
-    p.add_argument("channel", type=int, choices=range(1, 9))
-    for flag in ("p", "i", "d"):
-        p.add_argument("--" + flag, type=float, default=None)
-    p.add_argument("--reset", type=float, default=None)
-    p.add_argument("--hysteresis", type=float, default=None, help="in kelvin")
-
-    for name, helptext in (("boost", "turn start boost on or off"),
-                           ("holdmin", "hold minimum power instead of stopping")):
-        q = writer(sub.add_parser(name, help=helptext))
-        q.add_argument("channel", type=int, choices=range(1, 9))
-        q.add_argument("state", choices=["on", "off"])
-
-    p = writer(sub.add_parser("link", help="make a channel follow another channel"))
-    p.add_argument("channel", type=int, choices=range(1, 9))
-    p.add_argument("target", type=int, choices=range(1, 9))
-
-    p = writer(sub.add_parser("maxrpm", help="chart full-scale rpm for a channel"))
-    p.add_argument("channel", type=int, choices=range(1, 9))
-    p.add_argument("rpm", type=int, nargs="?", default=None)
-
-    p = writer(sub.add_parser("fansource",
-                              help="which sensor drives a channel's controller"))
-    p.add_argument("channel", type=int, choices=range(1, 9))
-    p.add_argument("sensor", type=int, nargs="?", default=None,
-                   help="1-based sensor number")
-
-    p = writer(sub.add_parser("flow", help="read or set flow calibration (impulses/litre)"))
-    p.add_argument("impulses", type=int, nargs="?", default=None)
-
+    ap = build_parser()
     args = ap.parse_args()
+
     if args.help_udev:
         print(UDEV_HELP)
         return
-    if not args.cmd:
-        ap.print_help()
+    if not getattr(args, "func", None):
+        # A group named with no verb: show THAT group's help, not the top level.
+        # Each intermediate parser stashes itself in _helper, and the deepest one
+        # parsed wins because its set_defaults runs last.
+        getattr(args, "_helper", ap).print_help()
         return
 
-    for name in ("percent", "min", "max"):
-        val = getattr(args, name, None)
-        if val is not None and not 0.0 <= val <= 100.0:
-            sys.exit("%s must be between 0 and 100." % name)
+    for field, limit in (("percent", 100.0), ("min", 100.0), ("max", 100.0)):
+        value = getattr(args, field, None)
+        if value is not None and not 0.0 <= value <= limit:
+            sys.exit("%s must be between 0 and %g." % (field, limit))
 
-    if (args.cmd not in ("offset", "label", "rgb")
-            and getattr(args, "channel", None) is not None):
-        guard_pump(args.channel, args.force_pump)
+    if getattr(args, "guarded", False):
+        guard_channel(getattr(args, "channel", None), getattr(args, "force", False))
 
-    handler = {"show": cmd_show, "dump": cmd_dump, "restore": cmd_restore,
-               "set": cmd_set, "pin": cmd_pin, "window": cmd_window,
-               "offset": cmd_offset, "mode": cmd_mode, "curve": cmd_curve,
-               "target": cmd_target, "fallback": cmd_fallback,
-               "pid": cmd_pid, "boost": cmd_boost, "flow": cmd_flow,
-               "holdmin": cmd_holdmin, "maxrpm": cmd_maxrpm, "link": cmd_link,
-               "fansource": cmd_fansource,
-               "labels": cmd_labels, "label": cmd_label, "rgb": cmd_rgb}[args.cmd]
+    if getattr(args, "needs_device", True) is False:
+        args.func(None, args)
+        return
+
     with Octo.find() as octo:
-        handler(octo, args)
+        args.func(octo, args)
 
 
 if __name__ == "__main__":

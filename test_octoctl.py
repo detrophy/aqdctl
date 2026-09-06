@@ -27,86 +27,158 @@ class FakeOcto:
         self.written.append(bytes(buf))
 
 
+def _quiet(fn, args):
+    with contextlib.redirect_stdout(io.StringIO()):
+        return fn(None, args)
+
+
 def ns(**kw):
-    base = dict(dry_run=True, yes=True, backup=None, force_pump=False,
-                flag=None, no_flag=None, source=None, power=None, brightness=None,
-                filter_rise=None, filter_fall=None)
+    base = dict(dry_run=True, yes=True, backup=None, force=False,
+                flag=None, no_flag=None, sensor=None, param=None,
+                effect=None, color=None, background=None,
+                filter_rise=None, filter_fall=None, pos=None, preset=None)
     base.update(kw)
     return argparse.Namespace(**base)
 
 
+# (label, handler, namespace, expect)
+#   expect None  -> must run cleanly
+#   expect "exit" -> must refuse with SystemExit, i.e. the tool rejects bad input
+#                    instead of writing something wrong
 CASES = [
-    ("show",        m.cmd_show,   ns()),
-    ("labels",      m.cmd_labels, ns()),
-    ("label read",  m.cmd_label,  ns(group="temp", index=1, text=None)),
-    ("label write", m.cmd_label,  ns(group="temp", index=1, text="Wasser Vorlauf")),
-    ("label fan",   m.cmd_label,  ns(group="fan", index=3, text="Unten Seite")),
-    ("offset read", m.cmd_offset, ns(sensor=1, celsius=None)),
-    ("offset write",m.cmd_offset, ns(sensor=2, celsius=-1.25)),
-    ("set",         m.cmd_set,    ns(channel=3, percent=40.0)),
-    ("pin",         m.cmd_pin,    ns(channel=4, percent=35.0)),
-    ("window",      m.cmd_window, ns(channel=3, min=25.0, max=35.0)),
-    ("mode target", m.cmd_mode,   ns(channel=3, mode="target")),
-    ("mode manual", m.cmd_mode,   ns(channel=3, mode="manual")),
-    ("mode curve",  m.cmd_mode,   ns(channel=7, mode="curve")),
-    ("curve read",  m.cmd_curve,  ns(channel=7, linear=None, points=None)),
-    ("curve linear",m.cmd_curve,  ns(channel=7, linear=[27.0, 45.0, 0.0, 50.0], points=None)),
-    ("target",      m.cmd_target, ns(channel=3, celsius=36.0)),
-    ("fallback",    m.cmd_fallback, ns(channel=3, percent=35.0)),
-    ("pid read",    m.cmd_pid,    ns(channel=5, p=None, i=None, d=None,
-                                      reset=None, hysteresis=None)),
-    ("pid write",   m.cmd_pid,    ns(channel=5, p=1400.0, i=1200.0, d=0.0,
-                                      reset=4.0, hysteresis=0.2)),
-    ("boost on",    m.cmd_boost,  ns(channel=6, state="on")),
-    ("boost off",   m.cmd_boost,  ns(channel=6, state="off")),
-    ("fansource rd",m.cmd_fansource, ns(channel=3, sensor=None)),
-    ("fansource wr",m.cmd_fansource, ns(channel=3, sensor=2)),
-    ("holdmin off", m.cmd_holdmin, ns(channel=6, state="off")),
-    ("holdmin on",  m.cmd_holdmin, ns(channel=6, state="on")),
-    ("maxrpm read", m.cmd_maxrpm,  ns(channel=3, rpm=None)),
-    ("maxrpm write",m.cmd_maxrpm,  ns(channel=3, rpm=2600)),
-    ("rgb power off",m.cmd_rgb,   ns(index=None, colour=None, entry=0, param=None,
-                                     mode=None, power="off")),
-    ("rgb power on", m.cmd_rgb,   ns(index=None, colour=None, entry=0, param=None,
-                                     mode=None, power="on")),
-    ("link",         m.cmd_link,  ns(channel=6, target=3)),
-    ("rgb bright",   m.cmd_rgb,   ns(index=None, colour=None, entry=0, param=None,
-                                     mode=None, brightness=45.0)),
-    ("rgb bad mode", m.cmd_rgb,   ns(index=7, colour=None, entry=0, param=None,
-                                     mode="0x06")),
-    ("flow read",   m.cmd_flow,   ns(impulses=None)),
-    ("flow set",    m.cmd_flow,   ns(impulses=147)),
-    ("rgb list all",m.cmd_rgb,    ns(index=None, colour=None, entry=0, param=None, mode=None)),
-    ("rgb detail",  m.cmd_rgb,    ns(index=7, colour=None, entry=0, param=None, mode=None)),
-    ("rgb colour",  m.cmd_rgb,    ns(index=1, colour="DD2FA7", entry=0, param=None, mode=None)),
-    ("rgb entry1",  m.cmd_rgb,    ns(index=7, colour="#00FF80", entry=1, param=None, mode=None)),
-    ("rgb param",   m.cmd_rgb,    ns(index=7, colour=None, entry=0,
-                                     param=["speed=30", "2=25"], mode=None)),
-    ("rgb mode",    m.cmd_rgb,    ns(index=8, colour=None, entry=0, param=None, mode="wave")),
-    ("rgb flag on", m.cmd_rgb,    ns(index=8, colour=None, entry=0, param=None, mode=None,
-                                     flag=["slide_colors"])),
-    ("rgb flag off",m.cmd_rgb,    ns(index=8, colour=None, entry=0, param=None, mode=None,
-                                     no_flag=["fade"])),
-    ("mode+flag",   m.cmd_rgb,    ns(index=9, colour=None, entry=0, param=None,
-                                     mode="rain", flag=["snow"])),
-    ("rgb source",  m.cmd_rgb,    ns(index=7, colour=None, entry=0, param=None,
-                                     mode=None, source="1")),
-    ("rgb no src",  m.cmd_rgb,    ns(index=7, colour=None, entry=0, param=None,
-                                     mode=None, source="none")),
-    ("rgb filters", m.cmd_rgb,    ns(index=7, colour=None, entry=0, param=None, mode=None,
-                                     filter_rise=11, filter_fall=16)),
-    ("rgb srcflag", m.cmd_rgb,    ns(index=7, colour=None, entry=0, param=None, mode=None,
-                                     flag=["source_speed"])),
+    ("info all",      m.cmd_info,       ns(section=None), None),
+    ("info fan",      m.cmd_info,       ns(section="fan"), None),
+    ("info rgb",      m.cmd_info,       ns(section="rgb"), None),
+    ("info sensor",   m.cmd_info,       ns(section="sensor"), None),
+
+    ("name list",     m.cmd_name_list,  ns(), None),
+    ("name read",     m.cmd_name,       ns(group="sensor", index=1, text=None), None),
+    ("name sensor",   m.cmd_name,       ns(group="sensor", index=1, text="Wasser Vorlauf"), None),
+    ("name fan",      m.cmd_name,       ns(group="fan", index=3, text="Unten Seite"), None),
+    ("name umlaut",   m.cmd_name,       ns(group="fan", index=7, text="h\u00f6ren"), None),
+    ("name too long", m.cmd_name,       ns(group="fan", index=3, text="x" * 40), "exit"),
+    ("name bad index",m.cmd_name,       ns(group="sensor", index=9, text="x"), "exit"),
+
+    ("offset read",   m.cmd_offset,     ns(sensor=1, celsius=None), None),
+    ("offset write",  m.cmd_offset,     ns(sensor=2, celsius=-1.25), None),
+    ("offset range",  m.cmd_offset,     ns(sensor=2, celsius=-40.0), "exit"),
+    ("flow read",     m.cmd_flow,       ns(impulses=None), None),
+    ("flow write",    m.cmd_flow,       ns(impulses=147), None),
+
+    ("mode fixed",    m.cmd_mode_fixed, ns(channel=3, percent=40.0), None),
+    ("mode target",   m.cmd_mode_target,ns(channel=3, celsius=36.0), None),
+    ("target keep",   m.cmd_mode_target,ns(channel=3, celsius=None), None),
+    ("target sensor", m.cmd_mode_target,ns(channel=3, celsius=36.0, sensor="2"), None),
+    ("target flow",   m.cmd_mode_target,ns(channel=3, celsius=36.0, sensor="flow"), None),
+    ("target raw src",m.cmd_mode_target,ns(channel=3, celsius=36.0, sensor="#43"), None),
+    ("target bad src",m.cmd_mode_target,ns(channel=3, celsius=36.0, sensor="9"), "exit"),
+    ("mode curve",    m.cmd_mode_curve, ns(channel=7, points=None, linear=None,
+                                           startup=None), None),
+    ("curve linear",  m.cmd_mode_curve, ns(channel=7, points=None, startup=None,
+                                           linear=[27.0, 45.0, 0.0, 50.0]), None),
+    ("curve points",  m.cmd_mode_curve, ns(channel=7, linear=None, startup=None,
+                                           points=",".join("%d:%d" % (20 + i, i * 5)
+                                                           for i in range(16))), None),
+    ("curve short",   m.cmd_mode_curve, ns(channel=7, linear=None, startup=None,
+                                           points="20:0,30:50"), "exit"),
+    ("curve both",    m.cmd_mode_curve, ns(channel=7, points="20:0", startup=None,
+                                           linear=[27.0, 45.0, 0.0, 50.0]), "exit"),
+    ("curve startup", m.cmd_mode_curve, ns(channel=7, points=None, linear=None,
+                                           startup=30.0), None),
+    ("mode follow",   m.cmd_mode_follow,ns(channel=6, target=3), None),
+    ("follow self",   m.cmd_mode_follow,ns(channel=6, target=6), "exit"),
+
+    ("limits",        m.cmd_limits,     ns(channel=3, min=25.0, max=35.0), None),
+    ("limits pin",    m.cmd_limits,     ns(channel=4, min=35.0, max=35.0), None),
+    ("fallback",      m.cmd_fallback,   ns(channel=3, percent=35.0), None),
+    ("boost on",      m.cmd_boost,      ns(channel=6, state="on"), None),
+    ("boost off",     m.cmd_boost,      ns(channel=6, state="off"), None),
+    ("hold-min off",  m.cmd_holdmin,    ns(channel=6, state="off"), None),
+    ("hold-min on",   m.cmd_holdmin,    ns(channel=6, state="on"), None),
+    ("max-rpm read",  m.cmd_maxrpm,     ns(channel=3, rpm=None), None),
+    ("max-rpm write", m.cmd_maxrpm,     ns(channel=3, rpm=2600), None),
+
+    ("pid read",      m.cmd_pid,        ns(channel=5, p=None, i=None, d=None,
+                                           reset=None, hysteresis=None), None),
+    ("pid explicit",  m.cmd_pid,        ns(channel=5, p=1400.0, i=1200.0, d=0.0,
+                                           reset=4.0, hysteresis=0.2), None),
+    ("pid preset",    m.cmd_pid,        ns(channel=5, preset="fast", p=None, i=None,
+                                           d=None, reset=None, hysteresis=None), None),
+    ("pid override",  m.cmd_pid,        ns(channel=5, preset="fast", p=None, i=None,
+                                           d=600.0, reset=None, hysteresis=None), None),
+
+    ("rgb off",       m.cmd_rgb_switch, ns(state="off"), None),
+    ("rgb on",        m.cmd_rgb_switch, ns(state="on"), None),
+    ("rgb bright",    m.cmd_rgb_brightness, ns(percent=45.0), None),
+    ("rgb bright bad",m.cmd_rgb_brightness, ns(percent=140.0), "exit"),
+    ("rgb effects",   m.cmd_rgb_effects,ns(effect=None), None),
+    ("rgb effect one",m.cmd_rgb_effects,ns(effect="wave"), None),
+    ("rgb effect bad",m.cmd_rgb_effects,ns(effect="nope"), "exit"),
+
+    # channel + position addressing against the real ranges in the fixture:
+    # ch1 1-28 static, ch2 1-15 colour change, 16-30 scanner, 31-45 rain,
+    # 46-60 static, 61-79 wave.
+    ("rgb edit exact",m.cmd_rgb_set,    ns(channel=2, pos="61-79",
+                                           param=["speed=30"]), None),
+    ("rgb new slot",  m.cmd_rgb_set,    ns(channel=1, pos="40-54",
+                                           effect="static", color="FF0000"), None),
+    ("rgb new no fx", m.cmd_rgb_set,    ns(channel=1, pos="40-54"), "exit"),
+    ("rgb overlap",   m.cmd_rgb_set,    ns(channel=2, pos="10-20",
+                                           effect="static"), "exit"),
+    ("rgb colour",    m.cmd_rgb_set,    ns(channel=1, pos="1-28",
+                                           color="DD2FA7"), None),
+    ("rgb bg+list",   m.cmd_rgb_set,    ns(channel=2, pos="61-79",
+                                           background="0A0A0A",
+                                           color="FF0000,00FF00,0000FF"), None),
+    ("rgb too many",  m.cmd_rgb_set,    ns(channel=2, pos="16-30",
+                                           color="FF0000,00FF00,0000FF"), "exit"),
+    ("rgb no bg",     m.cmd_rgb_set,    ns(channel=2, pos="1-15",
+                                           background="0A0A0A"), "exit"),
+    ("rgb count kw",  m.cmd_rgb_set,    ns(channel=2, pos="61-79",
+                                           param=["count=3"]), "exit"),
+    ("rgb bad param", m.cmd_rgb_set,    ns(channel=2, pos="61-79",
+                                           param=["nope=3"]), "exit"),
+    ("rgb effect set",m.cmd_rgb_set,    ns(channel=2, pos="46-60",
+                                           effect="wave"), None),
+    ("rgb unimpl",    m.cmd_rgb_set,    ns(channel=2, pos="46-60",
+                                           effect="0x06"), None),
+    ("rgb flag on",   m.cmd_rgb_set,    ns(channel=2, pos="16-30",
+                                           flag=["reverse"]), None),
+    ("rgb flag off",  m.cmd_rgb_set,    ns(channel=2, pos="16-30",
+                                           no_flag=["circular"]), None),
+    ("rgb bad flag",  m.cmd_rgb_set,    ns(channel=2, pos="16-30",
+                                           flag=["nonsense"]), "exit"),
+    ("rgb fx+flag",   m.cmd_rgb_set,    ns(channel=2, pos="31-45",
+                                           effect="rain", flag=["snow"]), None),
+    ("rgb sensor",    m.cmd_rgb_set,    ns(channel=2, pos="61-79", sensor="1"), None),
+    ("rgb no sensor", m.cmd_rgb_set,    ns(channel=2, pos="61-79", sensor="none"), None),
+    ("rgb filters",   m.cmd_rgb_set,    ns(channel=2, pos="61-79",
+                                           filter_rise=11, filter_fall=16), None),
+    ("rgb srcflag",   m.cmd_rgb_set,    ns(channel=2, pos="61-79",
+                                           flag=["source_speed"]), None),
+    ("rgb bad pos",   m.cmd_rgb_set,    ns(channel=2, pos="30-10",
+                                           effect="static"), "exit"),
+    ("rgb pos overrun",m.cmd_rgb_set,   ns(channel=2, pos="1-200",
+                                           effect="static"), "exit"),
+    ("rgb remove one",m.cmd_rgb_remove, ns(channel=2, pos="61-79"), None),
+    ("rgb remove ch", m.cmd_rgb_remove, ns(channel=2, pos=None), None),
+    ("rgb remove none",m.cmd_rgb_remove,ns(channel=1, pos="70-80"), "exit"),
 ]
 
 failures = []
-for name, fn, args in CASES:
+for name, fn, args, expect in CASES:
     try:
         with contextlib.redirect_stdout(io.StringIO()):
             fn(FakeOcto(), args)
-        print("  ok    %s" % name)
+        if expect == "exit":
+            failures.append((name, "expected a refusal, but it ran"))
+            print("  FAIL  %s -> should have been refused" % name)
+        else:
+            print("  ok    %s" % name)
     except SystemExit as e:
-        if e.code:
+        if expect == "exit":
+            print("  ok    %s (refused: %s)" % (name, str(e).split(chr(10))[0][:60]))
+        elif e.code:
             failures.append((name, "SystemExit: %s" % e))
             print("  FAIL  %s -> %s" % (name, e))
         else:
@@ -120,16 +192,16 @@ for name, fn, args in CASES:
 with tempfile.TemporaryDirectory() as tmp:
     try:
         with contextlib.redirect_stdout(io.StringIO()):
-            m.cmd_dump(FakeOcto(), ns(output=os.path.join(tmp, "d.bin")))
+            m.cmd_backup(FakeOcto(), ns(output=os.path.join(tmp, "d.bin")))
         produced = sorted(os.listdir(tmp))
-        assert len(produced) == 2, "dump should write both reports, got %s" % produced
-        print("  ok    dump -> %s" % produced)
+        assert len(produced) == 2, "backup should write both reports, got %s" % produced
+        print("  ok    backup -> %s" % produced)
         for f in produced:
             with contextlib.redirect_stdout(io.StringIO()):
                 m.cmd_restore(FakeOcto(), ns(file=os.path.join(tmp, f)))
             print("  ok    restore %s" % f)
     except Exception:
-        failures.append(("dump/restore", traceback.format_exc()))
+        failures.append(("backup/restore", traceback.format_exc()))
         traceback.print_exc()
 
 # HSV codec must round-trip every channel-extreme colour exactly
@@ -736,14 +808,45 @@ if bad:
 else:
     print("  ok    labels are Latin-1: 'hören' stores as 68 f6 72 65 6e")
 
-# the pump guard must reject channels 1-2
-for ch in (1, 2):
+# Channel protection is a local setting now, not a hardcoded pump list, so the
+# test drives it through a throwaway config directory instead of the real one.
+bad = []
+with tempfile.TemporaryDirectory() as tmp:
+    real_config_path = m.config_path
+    m.config_path = lambda: os.path.join(tmp, "config.json")
     try:
-        m.guard_pump(ch, False)
-        failures.append(("pump guard ch%d" % ch, "did not refuse"))
-        print("  FAIL  pump guard ch%d" % ch)
-    except SystemExit:
-        print("  ok    pump guard refuses ch%d" % ch)
+        if m.protected_channels():
+            bad.append("a fresh config should protect nothing")
+        _quiet(m.cmd_protect, ns(channel=1, state="on"))
+        _quiet(m.cmd_protect, ns(channel=2, state="on"))
+        if m.protected_channels() != {1, 2}:
+            bad.append("protect on did not stick: %r" % (m.protected_channels(),))
+        for ch in (1, 2):
+            try:
+                m.guard_channel(ch, False)
+                bad.append("channel %d was not refused" % ch)
+            except SystemExit:
+                pass
+        try:
+            m.guard_channel(1, True)          # --force must get through
+        except SystemExit:
+            bad.append("--force did not override the guard")
+        try:
+            m.guard_channel(3, False)         # unprotected must not be blocked
+        except SystemExit:
+            bad.append("channel 3 was refused but is not protected")
+        _quiet(m.cmd_protect, ns(channel=1, state="off"))
+        if m.protected_channels() != {2}:
+            bad.append("protect off did not stick: %r" % (m.protected_channels(),))
+    except Exception:
+        bad.append(traceback.format_exc())
+    finally:
+        m.config_path = real_config_path
+if bad:
+    failures.append(("channel protection", "; ".join(bad)))
+    print("  FAIL  channel protection: %s" % "; ".join(bad))
+else:
+    print("  ok    channel protection: on/off persists, guard refuses, --force wins")
 
 total = len(CASES) + 30
 print("\n%d/%d passed" % (total - len(failures), total))
