@@ -35,7 +35,7 @@ def _quiet(fn, args):
 def ns(**kw):
     base = dict(dry_run=True, verbose=False, yes=True, backup=None, force=False,
                 flag=None, no_flag=None, sensor=None, param=None,
-                effect=None, color=None, background=None,
+                effect=None, colour=None, background=None,
                 filter_rise=None, filter_fall=None, pos=None, preset=None)
     base.update(kw)
     return argparse.Namespace(**base)
@@ -121,17 +121,17 @@ CASES = [
     ("rgb edit exact",m.cmd_rgb_set,    ns(channel=2, pos="61-79",
                                            param=["speed=30"]), None),
     ("rgb new slot",  m.cmd_rgb_set,    ns(channel=1, pos="40-54",
-                                           effect="static", color="FF0000"), None),
+                                           effect="static", colour="FF0000"), None),
     ("rgb new no fx", m.cmd_rgb_set,    ns(channel=1, pos="40-54"), "exit"),
     ("rgb overlap",   m.cmd_rgb_set,    ns(channel=2, pos="10-20",
                                            effect="static"), "exit"),
     ("rgb colour",    m.cmd_rgb_set,    ns(channel=1, pos="1-28",
-                                           color="DD2FA7"), None),
+                                           colour="DD2FA7"), None),
     ("rgb bg+list",   m.cmd_rgb_set,    ns(channel=2, pos="61-79",
                                            background="0A0A0A",
-                                           color="FF0000,00FF00,0000FF"), None),
+                                           colour="FF0000,00FF00,0000FF"), None),
     ("rgb too many",  m.cmd_rgb_set,    ns(channel=2, pos="16-30",
-                                           color="FF0000,00FF00,0000FF"), "exit"),
+                                           colour="FF0000,00FF00,0000FF"), "exit"),
     ("rgb no bg",     m.cmd_rgb_set,    ns(channel=2, pos="1-15",
                                            background="0A0A0A"), "exit"),
     ("rgb count kw",  m.cmd_rgb_set,    ns(channel=2, pos="61-79",
@@ -741,8 +741,8 @@ for mode2, mode1, mode, name in ((7, 9, 0x09, "laser"), (8, 10, 0x08, "scanner")
     if CM[ba + m.RGB_FLAGS_OFFSET] != 0x20 or CM[bb + m.RGB_FLAGS_OFFSET] != 0x00:
         bad.append("%s flags %#04x/%#04x want 0x20/0x00"
                    % (name, CM[ba + m.RGB_FLAGS_OFFSET], CM[bb + m.RGB_FLAGS_OFFSET]))
-    if m.RGB_FLAG_NAMES[mode].get("color_mode2") != 0x20:
-        bad.append("%s color_mode2 mask wrong" % name)
+    if m.RGB_FLAG_NAMES[mode].get("colour_mode2") != 0x20:
+        bad.append("%s colour_mode2 mask wrong" % name)
 if bad:
     failures.append(("colour mode 2", "; ".join(bad)))
     print("  FAIL  colour mode 2: %s" % "; ".join(bad))

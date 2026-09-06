@@ -135,7 +135,7 @@ def source_short(index):
 # under a LE16-at-+23 reading, so only an effect with a large value (colour
 # gradient, limits up to 1000) distinguishes them - that capture settled it.
 RGB_PARAM = 22
-RGB_COLOR = 46        # 6 palette entries of 4 bytes
+RGB_COLOUR = 46        # 6 palette entries of 4 bytes
 RGB_PALETTE_ENTRIES = 6
 HUE_FULL = 1536
 
@@ -143,14 +143,14 @@ HUE_FULL = 1536
 # PROTOCOL_EFFECTS.md). Verified on this Octo for 0x01 static and 0x0A wave;
 # the rest are carried over on the strength of that match, not observed here.
 RGB_MODES = {0x01: "static", 0x02: "breathing", 0x03: "rotating rainbow",
-             0x04: "blinking", 0x05: "color change", 0x07: "sequence",
+             0x04: "blinking", 0x05: "colour change", 0x07: "sequence",
              0x08: "scanner", 0x09: "laser", 0x0A: "wave",
-             0x0B: "color sequence", 0x0C: "color shift", 0x0D: "bar graph",
+             0x0B: "colour sequence", 0x0C: "colour shift", 0x0D: "bar graph",
              0x0E: "flame", 0x0F: "rain", 0x10: "snowfall", 0x11: "stardust",
-             0x12: "color switch", 0x13: "swiping rainbow",
+             0x12: "colour switch", 0x13: "swiping rainbow",
              0x14: "sound flash", 0x15: "sound bars", 0x16: "sound slider",
              0x17: "sound shift", 0x18: "ambientpx",
-             0x21: "color gradient"}
+             0x21: "colour gradient"}
 # 0x14-0x18 are driven by an Aquasuite host DLL (audio capture, screen capture).
 # The device stores the mode and the palette, but the animation data is streamed
 # from the PC, so these do nothing on a machine without Aquasuite running.
@@ -168,14 +168,14 @@ RGB_FLAGS_OFFSET = 5
 RGB_PARAM_NAMES = {
     0x01: [],
     0x02: ["speed", "intensity", "delay_max", "delay_min"],
-    0x03: ["speed", "color_range"],
+    0x03: ["speed", "colour_range"],
     0x04: ["speed", "count"],
     0x05: ["speed", "count"],
     0x07: ["speed", "smoothness", "count", "delay_after", "delay_before"],
-    0x0B: ["speed", "smoothness", "", "count", "color_change_speed"],
-    0x0C: ["speed", "color_range", "total_area"],
+    0x0B: ["speed", "smoothness", "", "count", "colour_change_speed"],
+    0x0C: ["speed", "colour_range", "total_area"],
     0x13: ["point_speed", "point_smoothness", "point_size",
-           "color_change_speed", "color_range"],
+           "colour_change_speed", "colour_range"],
     0x08: ["speed", "smoothness", "width", "start_delay",
            "interval_min", "interval_max"],
     0x09: ["speed", "smoothness", "width", "start_delay",
@@ -189,25 +189,25 @@ RGB_PARAM_NAMES[0x10] = RGB_PARAM_NAMES[0x11] = RGB_PARAM_NAMES[0x0F]
 # Bitmasks in the flags byte at +5. fade on colour-change is directly confirmed;
 # the all-off captures confirm the others are absent, not their values.
 RGB_FLAG_NAMES = {
-    0x04: {"fade": 0x04, "random_color": 0x08, "slide_colors": 0x10},
-    0x05: {"fade": 0x04, "random_color": 0x08, "slide_colors": 0x10},
-    # color_mode2 swaps the symmetric [bg, c2, c1, c2, bg] dot for a plain
+    0x04: {"fade": 0x04, "random_colour": 0x08, "slide_colours": 0x10},
+    0x05: {"fade": 0x04, "random_colour": 0x08, "slide_colours": 0x10},
+    # colour_mode2 swaps the symmetric [bg, c2, c1, c2, bg] dot for a plain
     # 50/50 split [bg, c1, c2, bg]. Confirmed: it is the only byte that differs
     # between an otherwise identical mode-1 and mode-2 scanner or laser.
-    0x08: {"reverse": 0x02, "random_color": 0x08, "color_mode2": 0x20,
-           "color_change": 0x40, "circular": 0x80},
-    0x09: {"reverse": 0x02, "random_color": 0x08, "color_mode2": 0x20,
-           "color_change": 0x40, "circular": 0x80},
-    0x0A: {"reverse": 0x02, "random_color": 0x08, "circular": 0x80},
-    0x0F: {"reverse": 0x02, "random_color": 0x08, "snow": 0x10},
+    0x08: {"reverse": 0x02, "random_colour": 0x08, "colour_mode2": 0x20,
+           "colour_change": 0x40, "circular": 0x80},
+    0x09: {"reverse": 0x02, "random_colour": 0x08, "colour_mode2": 0x20,
+           "colour_change": 0x40, "circular": 0x80},
+    0x0A: {"reverse": 0x02, "random_colour": 0x08, "circular": 0x80},
+    0x0F: {"reverse": 0x02, "random_colour": 0x08, "snow": 0x10},
 }
 RGB_FLAG_NAMES[0x10] = RGB_FLAG_NAMES[0x11] = RGB_FLAG_NAMES[0x0F]
 RGB_FLAG_NAMES[0x02] = {}
 RGB_FLAG_NAMES[0x03] = {"reverse": 0x02}
 RGB_FLAG_NAMES[0x0C] = {"reverse": 0x02}
 RGB_FLAG_NAMES[0x13] = {"reverse": 0x01}
-RGB_FLAG_NAMES[0x07] = {"reverse": 0x02, "fade": 0x04, "random_color": 0x08}
-RGB_FLAG_NAMES[0x0B] = {"reverse": 0x02, "random_color": 0x08}
+RGB_FLAG_NAMES[0x07] = {"reverse": 0x02, "fade": 0x04, "random_colour": 0x08}
+RGB_FLAG_NAMES[0x0B] = {"reverse": 0x02, "random_colour": 0x08}
 # Which palette entries an effect uses, and what they mean.
 RGB_PALETTE_ROLES = {
     0x01: ["colour"],
@@ -767,7 +767,7 @@ def hsv_to_rgb(h, s, v):
 
 
 def rgb_slot(index):
-    return RGB_BASE + RGB_STRIDE * (index - 1) + RGB_COLOR
+    return RGB_BASE + RGB_STRIDE * (index - 1) + RGB_COLOUR
 
 
 def parse_hex_colour(text):
@@ -964,7 +964,7 @@ def set_param(buf, base, k, value):
 
 
 def rgb_entry(index, entry=0):
-    return RGB_BASE + RGB_STRIDE * (index - 1) + RGB_COLOR + 4 * entry
+    return RGB_BASE + RGB_STRIDE * (index - 1) + RGB_COLOUR + 4 * entry
 
 
 def read_entry(buf, index, entry=0):
@@ -978,10 +978,10 @@ def palette_roles(mode):
     validation in 'rgb set'."""
     has_bg, _lo, hi = RGB_PALETTE_SPEC.get(mode, (False, 0, 0))
     roles = ["background"] if has_bg else []
-    # A single-colour effect just has "color"; numbering one thing is noise.
+    # A single-colour effect just has "colour"; numbering one thing is noise.
     if hi == 1:
-        return roles + ["color"]
-    return roles + ["color %d" % (n + 1) for n in range(hi)]
+        return roles + ["colour"]
+    return roles + ["colour %d" % (n + 1) for n in range(hi)]
 
 
 def describe_rgb(buf, index, name):
@@ -1244,7 +1244,7 @@ def cmd_rgb_set(octo, args):
         print("  filter %s: %d -> %d" % (label, after[base + off], value))
         after[base + off] = value
 
-    if args.color is not None or args.background is not None:
+    if args.colour is not None or args.background is not None:
         has_bg, lo, hi = RGB_PALETTE_SPEC.get(mode, (False, 0, 0))
         effect = RGB_MODES.get(mode, "%#04x" % mode)
         if hi == 0:
@@ -1255,8 +1255,8 @@ def cmd_rgb_set(octo, args):
             sys.exit("Effect '%s' has no background colour." % effect)
 
         colours = []
-        if args.color is not None:
-            for text in args.color.split(","):
+        if args.colour is not None:
+            for text in args.colour.split(","):
                 colours.append(parse_hex_colour(text.strip()))
             if not lo <= len(colours) <= hi:
                 sys.exit("Effect '%s' takes %s colour%s, got %d."
@@ -1299,7 +1299,7 @@ def cmd_rgb_set(octo, args):
         key, _, raw = spec.partition("=")
         key = key.strip()
         if key == RGB_COUNT_PARAM:
-            sys.exit("'count' is the number of colours, so it comes from --color "
+            sys.exit("'count' is the number of colours, so it comes from --colour "
                      "and is not set by hand.")
         if key in labels:
             k = labels.index(key)
@@ -1360,7 +1360,7 @@ def cmd_rgb_effects(octo, args):
             bits = []
             if has_bg:
                 bits.append("--background RRGGBB")
-            bits.append("--color %s"
+            bits.append("--colour %s"
                         % ",".join(["RRGGBB"] * lo)
                         + ("[,...up to %d]" % hi if hi > lo else ""))
             print("  colours   : %s" % "  ".join(bits))
@@ -1736,7 +1736,7 @@ examples
   octoctl fan set 3 mode curve --linear 30 45 20 100 --sensor 1
   octoctl fan set 3 pid --preset fast
   octoctl fan set 1 protect on
-  octoctl rgb set 2 pos 1-15 --effect static --color FF0000
+  octoctl rgb set 2 pos 1-15 --effect static --colour FF0000
   octoctl rgb effects wave
   octoctl name fan 3 "Front Rad"
 
@@ -1938,9 +1938,9 @@ def build_parser():
         epilog="Colours are per-effect - run 'octoctl rgb effects NAME' to see\n"
                "what one accepts. Positions are 1-based and inclusive.\n\n"
                "examples:\n"
-               "  octoctl rgb set 2 pos 1-15 --effect static --color FF0000\n"
+               "  octoctl rgb set 2 pos 1-15 --effect static --colour FF0000\n"
                "  octoctl rgb set 2 pos 61-79 --effect wave --background 0A0A0A \\\n"
-               "                              --color FF0000,00FF00 --param speed=25\n"
+               "                              --colour FF0000,00FF00 --param speed=25\n"
                "  octoctl rgb set 1 pos 1-28 --sensor 1 --flag source_brightness"))
     p.add_argument("channel", type=int, choices=range(1, RGB_CHANNELS + 1),
                    metavar="CHANNEL", help="RGBpx header, 1-%d" % RGB_CHANNELS)
@@ -1949,7 +1949,7 @@ def build_parser():
                    help="LED range on this channel, 1-based inclusive, e.g. 1-15")
     p.add_argument("--effect", metavar="NAME",
                    help="effect name; 'rgb effects' lists them")
-    p.add_argument("--color", metavar="RRGGBB[,RRGGBB...]",
+    p.add_argument("--colour", metavar="RRGGBB[,RRGGBB...]",
                    help="the effect's colours, in role order")
     p.add_argument("--background", metavar="RRGGBB",
                    help="background colour, for effects that have one")
