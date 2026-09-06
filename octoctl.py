@@ -775,12 +775,16 @@ def decode_labels(buf):
 
 
 def commit(octo, before, after, args):
-    if not diff(before, after):
+    changes = diff(before, after)
+    if not changes:
         print("Nothing to change.")
         return
-    show_diff(before, after)
+    # The byte diff is for checking the tool, not for using it: on by request,
+    # and always on for a dry run, where seeing the bytes is the whole point.
+    if getattr(args, "verbose", False) or args.dry_run:
+        show_diff(before, after)
     if args.dry_run:
-        print("\n--dry-run: nothing written.")
+        print("--dry-run: nothing written.")
         return
     path = backup(before, args.backup)
     print("\nbackup written to %s" % path)
@@ -1679,6 +1683,14 @@ vocabulary
   position    an LED range on a channel, 1-based and inclusive: 1-15 is the
               first fifteen LEDs.
 
+write flags  (every command that changes something accepts these)
+  -n, --dry-run   read the device, show what would change, write nothing.
+                  Implies --verbose.
+  -v, --verbose   also print the byte-level diff of the report
+  -y, --yes       skip the confirmation prompt
+  --force         write even to a channel marked with 'protect on'
+  --backup FILE   where to put the automatic pre-write backup
+
 examples
   octoctl info
   octoctl fan set 3 mode fixed 40
@@ -1704,9 +1716,13 @@ def build_parser():
     sub = ap.add_subparsers(dest="group")
 
     def writer(p, guarded=False):
-        """Flags common to every command that writes to the device."""
+        """Flags common to every command that writes to the device.
+        Described together under "write flags" in the top-level help."""
         p.add_argument("-n", "--dry-run", action="store_true",
-                       help="show the byte diff and write nothing")
+                       help="show what would change and write nothing "
+                            "(implies --verbose)")
+        p.add_argument("-v", "--verbose", action="store_true",
+                       help="also show the byte-level diff")
         p.add_argument("-y", "--yes", action="store_true",
                        help="skip the confirmation prompt")
         p.add_argument("--backup", metavar="FILE",

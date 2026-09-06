@@ -33,7 +33,7 @@ def _quiet(fn, args):
 
 
 def ns(**kw):
-    base = dict(dry_run=True, yes=True, backup=None, force=False,
+    base = dict(dry_run=True, verbose=False, yes=True, backup=None, force=False,
                 flag=None, no_flag=None, sensor=None, param=None,
                 effect=None, color=None, background=None,
                 filter_rise=None, filter_fall=None, pos=None, preset=None)
