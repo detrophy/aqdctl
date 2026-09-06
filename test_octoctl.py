@@ -563,7 +563,7 @@ for value, target in ((0x03, 1), (0x05, 3), (0x0A, 8)):
 for value in (0x00, 0x01, 0x02):
     if m.is_linked(value):
         bad.append("mode %#04x must not read as linked" % value)
-if m.mode_name(0x05) != "link->ch3" or m.mode_name(0x02) != "curve":
+if m.mode_name(0x05) != "follow ch3" or m.mode_name(0x02) != "curve":
     bad.append("mode_name wrong: %r / %r" % (m.mode_name(0x05), m.mode_name(0x02)))
 # curve mode (0x02) must still be distinguishable from a link
 CAA = bytearray(open(os.path.join(FIX, "fan_curve_auto.bin"), "rb").read())

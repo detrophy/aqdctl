@@ -121,6 +121,16 @@ def source_label(index):
     if 0 <= index < 4:
         return "sensor %d" % (index + 1)
     return "source %d" % index
+
+
+def source_short(index):
+    """The same thing as source_label, in the form you would type after
+    --sensor. Used where a table column has to stay narrow."""
+    if index == SOURCE_FLOW:
+        return "flow"
+    if 0 <= index < 4:
+        return "%d" % (index + 1)
+    return "#%d" % index
 # Parameters are BE16 words at +22+2k. Values below 256 decode identically
 # under a LE16-at-+23 reading, so only an effect with a large value (colour
 # gradient, limits up to 1000) distinguishes them - that capture settled it.
@@ -271,7 +281,9 @@ FLOW_PULSES = 0x06   # BE16 impulses per litre
 MODE_MANUAL, MODE_TARGET, MODE_CURVE = 0x00, 0x01, 0x02
 LINK_OFFSET = 2
 LINK_MIN = LINK_OFFSET + 1          # 0x03 == follow channel 1
-MODE_BY_NAME = {"manual": MODE_MANUAL, "target": MODE_TARGET, "curve": MODE_CURVE}
+# The names here are the CLI verbs, deliberately: reading "manual" and typing
+# "fixed" is exactly the sort of mismatch this tool is trying to stop having.
+MODE_BY_NAME = {"fixed": MODE_MANUAL, "target": MODE_TARGET, "curve": MODE_CURVE}
 
 
 def is_linked(value):
@@ -285,8 +297,8 @@ def link_target(value):
 def mode_name(value):
     if is_linked(value):
         target = link_target(value)
-        return "link->ch%d" % target if 1 <= target <= 8 else "link->?%d" % target
-    return {MODE_MANUAL: "manual", MODE_TARGET: "target-temp",
+        return "follow ch%d" % target if 1 <= target <= 8 else "follow ?%d" % target
+    return {MODE_MANUAL: "fixed", MODE_TARGET: "target",
             MODE_CURVE: "curve"}.get(value, "unknown(%#04x)" % value)
 
 # Curve mode: 16 points, temperature and power arrays, both BE16 hundredths.
@@ -610,7 +622,7 @@ def info_fan(buf, names, live):
         rpm = live.get("fan", {}).get(ch)
         print("  %2d  %-15s  %-11s  %7.2f%%  %s  %6s  %5s  %5s  %4s  %s"
               % (ch, (names[ch - 1] or "-")[:15], c["mode_name"], c["setpoint"],
-                 target, source_label(c["source"]) if uses_source else "-",
+                 target, source_short(c["source"]) if uses_source else "-",
                  "-" if rpm is None else "%d" % rpm,
                  "on" if c["boost"] else "off",
                  "on" if c["hold_min"] else "off", ctrl))
@@ -619,19 +631,24 @@ def info_fan(buf, names, live):
             print("      curve %.1f-%.1fC -> %.1f-%.1f%%   startup %.2fC"
                   % (pts[0][0], pts[-1][0], pts[0][1], pts[-1][1],
                      be16(buf, channel_base(ch) + OFF_STARTUP) / 100.0))
-        base = channel_base(ch)
-        tuning = (be16(buf, base + OFF_PID_P), be16(buf, base + OFF_PID_I),
-                  be16(buf, base + OFF_PID_D),
-                  be16(buf, base + OFF_PID_RESET) / 10.0,
-                  be16(buf, base + OFF_HYSTERESIS) / 100.0)
-        preset = pid_preset_name(tuning)
-        print("      pid %s  (P %d  I %d  D %d  reset %gs  hysteresis %gK)"
-              % (preset if preset else "custom", tuning[0], tuning[1], tuning[2],
-                 tuning[3], tuning[4]))
+        if uses_source:
+            # Only shown where the channel regulates: a fixed or following
+            # channel stores a tuning too, but never uses it.
+            base = channel_base(ch)
+            tuning = (be16(buf, base + OFF_PID_P), be16(buf, base + OFF_PID_I),
+                      be16(buf, base + OFF_PID_D),
+                      be16(buf, base + OFF_PID_RESET) / 10.0,
+                      be16(buf, base + OFF_HYSTERESIS) / 100.0)
+            preset = pid_preset_name(tuning)
+            print("      pid %s  (P %d  I %d  D %d  reset %gs  hysteresis %gK)"
+                  % (preset if preset else "custom", tuning[0], tuning[1],
+                     tuning[2], tuning[3], tuning[4]))
     print()
     print("  'setpoint' is the stored fixed speed. It is what hwmon pwmN reads, and")
-    print("  it is only what the channel actually runs at in fixed-power mode.")
-    print("  'chart' maxima are omitted here; see 'fan set <ch> max-rpm'.")
+    print("  it is only what the channel actually runs at in fixed mode.")
+    print("  'sensor' is the number you would pass to --sensor.")
+    print("  Read a channel's full curve with 'fan set <ch> mode curve', and its")
+    print("  bar-graph maximum with 'fan set <ch> max-rpm'.")
 
 
 def info_rgb(buf, names):
@@ -656,12 +673,12 @@ def info_rgb(buf, names):
 
 def info_sensor(buf, names, live):
     st = decode(buf)
-    print("SENSORS")
-    print("  n  name             offset    reading")
-    print("  -  ---------------  --------  -------")
+    print("SENSORS  (4 temperature headers, 1 flow header)")
+    print("  ch  name             offset    reading")
+    print("  --  ---------------  --------  -------")
     for i in range(4):
         value = live.get("temp", {}).get(i + 1)
-        print("  %d  %-15s  %+7.2f  %s"
+        print("  %2d  %-15s  %+7.2f  %s"
               % (i + 1, (names[i] or "-")[:15], st["temp_offsets"][i],
                  "-" if value is None else "%.2f C" % value))
     print()
@@ -955,60 +972,82 @@ def read_entry(buf, index, entry=0):
     return (buf[o] << 8) | buf[o + 1], buf[o + 2], buf[o + 3]
 
 
+def palette_roles(mode):
+    """Role of each palette entry, in order, for an effect. Derived from
+    RGB_PALETTE_SPEC so it says the same thing as 'rgb effects' and as the
+    validation in 'rgb set'."""
+    has_bg, _lo, hi = RGB_PALETTE_SPEC.get(mode, (False, 0, 0))
+    roles = ["background"] if has_bg else []
+    # A single-colour effect just has "color"; numbering one thing is noise.
+    if hi == 1:
+        return roles + ["color"]
+    return roles + ["color %d" % (n + 1) for n in range(hi)]
+
+
 def describe_rgb(buf, index, name):
+    """One controller, in the vocabulary the commands use: channel, position,
+    effect, and colours by role. Positions are 1-based here and in --pos."""
     base = RGB_BASE + RGB_STRIDE * (index - 1)
     mode = buf[base + RGB_MODE]
-    tag = RGB_MODES.get(mode, "unimplemented"
-                        if mode in RGB_MODES_UNIMPLEMENTED else "unknown")
-    if mode not in RGB_MODES_VERIFIED and mode in RGB_MODES:
+    effect = RGB_MODES.get(mode)
+    tag = effect if effect else ("unimplemented"
+                                 if mode in RGB_MODES_UNIMPLEMENTED else "unknown")
+    if effect and mode not in RGB_MODES_VERIFIED:
         tag += "?"
     if mode in RGB_MODES_HOST_DRIVEN:
-        tag += " [needs Aquasuite on the host]"
-    print("  %2d  %-18s port %d  LEDs %d..%d (%d)  mode %#04x %s"
-          % (index, name, buf[base + RGB_PORT], buf[base + RGB_START],
-             buf[base + RGB_START] + buf[base + RGB_COUNT_OFF] - 1,
-             buf[base + RGB_COUNT_OFF], mode, tag))
-    words = [get_param(buf, base, k) for k in range(9)]
+        tag += "  [needs the official software running]"
+    first = buf[base + RGB_START] + 1
+    count = buf[base + RGB_COUNT_OFF]
+    print("  %2d  %-18s channel %d, LEDs %d-%d   effect %s"
+          % (index, name, buf[base + RGB_PORT] + 1, first, first + count - 1, tag))
+
+    # 'count' is the length of the colour list, shown with the colours instead.
     labels = RGB_PARAM_NAMES.get(mode, [])
-    shown = [("%s=%d" % (labels[k], w)) if k < len(labels) else "k%d=%d" % (k, w)
-             for k, w in enumerate(words) if w or k < len(labels)]
+    shown = []
+    for k in range(9):
+        value = get_param(buf, base, k)
+        label = labels[k] if k < len(labels) else ""
+        if label == RGB_COUNT_PARAM:
+            continue
+        if label:
+            shown.append("%s=%d" % (label, value))
+        elif value:
+            shown.append("unnamed%d=%d" % (k, value))
     if shown:
         print("      params: " + "  ".join(shown))
+
     flags = buf[base + RGB_FLAGS_OFFSET]
     known = RGB_FLAG_NAMES.get(mode, {})
     on = [n for n, bit in sorted(known.items()) if flags & bit]
     leftover = flags & ~sum(known.values()) if known else flags
     if on or leftover:
-        extra = "  unknown bits %#04x" % leftover if leftover else ""
-        print("      flags : %#04x  %s%s" % (flags, ", ".join(on) or "none", extra))
-    src = (buf[base + RGB_SOURCE] << 8) | buf[base + RGB_SOURCE + 1]
+        extra = "   unknown bits %#04x" % leftover if leftover else ""
+        print("      flags : %s%s" % (", ".join(on) or "none", extra))
+
+    src = be16(buf, base + RGB_SOURCE)
     if src != RGB_SOURCE_NONE:
-        print("      source: %s (index %d)   filter rise=%d fall=%d"
-              % (source_label(src), src,
-                 buf[base + RGB_FILTER_RISE], buf[base + RGB_FILTER_FALL]))
+        print("      sensor: %s   filter rise=%d fall=%d"
+              % (source_label(src), buf[base + RGB_FILTER_RISE],
+                 buf[base + RGB_FILTER_FALL]))
         sflags = buf[base + RGB_SOURCE_FLAGS]
         on = [n for n, bit in sorted(RGB_SOURCE_FLAG_NAMES.items()) if sflags & bit]
         rest = sflags & ~sum(RGB_SOURCE_FLAG_NAMES.values())
         if sflags:
-            print("      source flags: %#04x  %s%s"
-                  % (sflags, ", ".join(on) or "none",
-                     "  unknown bits %#04x" % rest if rest else ""))
-        for tag, (lo, hi, omin, omax) in zip(("A speed", "B bright"), RGB_MAPS):
-            print("      map %-8s: %d .. %d  ->  %d .. %d" % (tag,
-                  (buf[base + lo] << 8) | buf[base + lo + 1],
-                  (buf[base + hi] << 8) | buf[base + hi + 1],
-                  buf[base + omin], buf[base + omax]))
-    roles = RGB_PALETTE_ROLES.get(mode, [])
+            print("      sensor drives: %s%s"
+                  % (", ".join(on) or "none",
+                     "   unknown bits %#04x" % rest if rest else ""))
+        for tag_, (lo, hi, omin, omax) in zip(("speed ", "bright"), RGB_MAPS):
+            print("      maps %s: %d .. %d  ->  %d .. %d"
+                  % (tag_, be16(buf, base + lo), be16(buf, base + hi),
+                     buf[base + omin], buf[base + omax]))
+
+    roles = palette_roles(mode)
     for e in range(RGB_PALETTE_ENTRIES):
         h, sat, val = read_entry(buf, index, e)
-        if h or sat or val:
-            if mode == 0x05:
-                role = " (colour %d of list)" % (e + 1)
-            elif e < len(roles):
-                role = " (%s)" % roles[e]
-            else:
-                role = ""
-            print("      colour %d: #%02X%02X%02X%s" % (e, *hsv_to_rgb(h, sat, val), role))
+        if not (h or sat or val):
+            continue
+        role = roles[e] if e < len(roles) else "stored, unused by this effect"
+        print("      %-12s #%02X%02X%02X" % (role + ":", *hsv_to_rgb(h, sat, val)))
 
 
 # A controller slot as the device leaves it when nothing is configured: mode 0,
