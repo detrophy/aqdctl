@@ -11,6 +11,7 @@ Requires: python-hidapi. Needs write access to the Octo's hidraw node
 
 import argparse
 import datetime
+import errno
 import json
 import os
 import struct
@@ -367,7 +368,7 @@ def save_config(cfg):
     os.makedirs(directory, exist_ok=True)
     if fresh:
         _give_back(directory)
-    with open(path, "w") as fh:
+    with _open_nofollow(path, "w") as fh:
         json.dump(cfg, fh, indent=2, sort_keys=True)
         fh.write("\n")
     _give_back(path)
@@ -396,9 +397,28 @@ def _give_back(path):
     user = _invoking_user()
     if user:
         try:
-            os.chown(path, user.pw_uid, user.pw_gid)
+            # lchown, not chown: if the path is a symlink we hand over the link
+            # itself rather than whatever it points at.
+            os.lchown(path, user.pw_uid, user.pw_gid)
         except OSError:
             pass
+
+
+def _open_nofollow(path, mode):
+    """Open a file for writing, refusing a symlink at the final component.
+
+    The config and the backups live in the invoking user's home but are written
+    while root. Without this, a symlink left in place of one of them has root
+    truncate - and _give_back chown - whatever it points at. Only the last
+    component is covered; a symlinked parent directory is still followed."""
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW,
+                     0o644)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            sys.exit("%s is a symlink; refusing to write through it." % path)
+        raise
+    return os.fdopen(fd, mode)
 
 
 # --------------------------------------------------------------------- codec
@@ -433,7 +453,11 @@ def sbe16(buf, off):
 
 
 def put_be16(buf, off, val):
-    struct.pack_into(">H", buf, off, val & 0xFFFF)
+    # Masking here would turn a negative percentage into a plausible 600% rather
+    # than an error, so out-of-range is a bug to raise on, not to round off.
+    if not 0 <= val <= 0xFFFF:
+        raise ValueError("BE16 value %r out of range at offset %#05x" % (val, off))
+    struct.pack_into(">H", buf, off, val)
 
 
 def pct(raw):
@@ -442,6 +466,30 @@ def pct(raw):
 
 def to_raw_pct(percent):
     return int(round(percent * 100))
+
+
+def require_pct(value, label="percent"):
+    """Bound a percentage inside the handler, not only in main().
+
+    main() screens the CLI, but the handlers are also called directly - by the
+    test suite, and by anything that imports this module - where nothing else
+    stands between a bad value and the device."""
+    if value is None or not 0.0 <= value <= 100.0:
+        sys.exit("%s must be between 0 and 100." % label)
+    return value
+
+
+def require_window(low, high, channel=None):
+    """Refuse an inverted power window.
+
+    Both ends can be valid percentages while the pair is not: a minimum above
+    the maximum is not how you pin a channel - equal limits are."""
+    if low is None or high is None or low <= high:
+        return
+    where = " %d" % channel if channel is not None else ""
+    sys.exit("Minimum power (%.2f%%) is above the maximum (%.2f%%).\n"
+             "For a fixed point use equal limits: 'fan set%s limits %g %g'."
+             % (low, high, where, low, low))
 
 
 # -------------------------------------------------------------------- device
@@ -704,7 +752,7 @@ def backup(buf, explicit=None, rid=None):
         stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         tag = "%02x" % (rid if rid is not None else buf[0])
         path = os.path.join(directory, "octo-%s-%s.bin" % (tag, stamp))
-    with open(path, "wb") as fh:
+    with _open_nofollow(path, "wb") as fh:
         fh.write(bytes(buf))
     _give_back(path)
     return path
@@ -919,7 +967,7 @@ def cmd_mode_fixed(octo, args):
     base = channel_base(args.channel)
     prev = before[base + OFF_MODE]
     after[base + OFF_MODE] = MODE_MANUAL
-    put_be16(after, base + OFF_SETPOINT, to_raw_pct(args.percent))
+    put_be16(after, base + OFF_SETPOINT, to_raw_pct(require_pct(args.percent)))
     reseal(after)
     print("channel %d: %s -> fixed %.2f%%"
           % (args.channel, mode_name(prev), args.percent))
@@ -935,6 +983,9 @@ def cmd_mode_fixed(octo, args):
 
 def cmd_limits(octo, args):
     """Set a channel's minimum and maximum power window."""
+    require_pct(args.min, "min")
+    require_pct(args.max, "max")
+    require_window(args.min, args.max, args.channel)
     before = octo.read()
     rec = record_base(args.channel)
     after = bytearray(before)
@@ -1412,6 +1463,10 @@ def cmd_name(octo, args):
     if args.text is None:
         print(current)
         return
+    if "\x00" in args.text:
+        # The device terminates a name at the first NUL, so this would store a
+        # label that reads back shorter than what was asked for.
+        sys.exit("A label cannot contain a NUL byte.")
     try:
         encoded = args.text.encode(LABEL_ENCODING)
     except UnicodeEncodeError:
@@ -1617,7 +1672,7 @@ def cmd_fallback(octo, args):
     before = octo.read()
     after = bytearray(before)
     rec = record_base(args.channel)
-    put_be16(after, rec + REC_FALLBACK, to_raw_pct(args.percent))
+    put_be16(after, rec + REC_FALLBACK, to_raw_pct(require_pct(args.percent)))
     reseal(after)
     print("channel %d fallback: %.2f%% -> %.2f%%"
           % (args.channel, pct(be16(before, rec + REC_FALLBACK)), args.percent))
@@ -2096,6 +2151,8 @@ def main():
         value = getattr(args, field, None)
         if value is not None and not 0.0 <= value <= limit:
             sys.exit("%s must be between 0 and %g." % (field, limit))
+    require_window(getattr(args, "min", None), getattr(args, "max", None),
+                   getattr(args, "channel", None))
 
     if getattr(args, "guarded", False):
         guard_channel(getattr(args, "channel", None), getattr(args, "force", False))

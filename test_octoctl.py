@@ -57,6 +57,7 @@ CASES = [
     ("name fan",      m.cmd_name,       ns(group="fan", index=3, text="Unten Seite"), None),
     ("name umlaut",   m.cmd_name,       ns(group="fan", index=7, text="h\u00f6ren"), None),
     ("name too long", m.cmd_name,       ns(group="fan", index=3, text="x" * 40), "exit"),
+    ("name with NUL", m.cmd_name,       ns(group="fan", index=3, text="a\x00b"), "exit"),
     ("name bad index",m.cmd_name,       ns(group="sensor", index=9, text="x"), "exit"),
 
     ("offset read",   m.cmd_offset,     ns(sensor=1, celsius=None), None),
@@ -90,7 +91,12 @@ CASES = [
 
     ("limits",        m.cmd_limits,     ns(channel=3, min=25.0, max=35.0), None),
     ("limits pin",    m.cmd_limits,     ns(channel=4, min=35.0, max=35.0), None),
+    ("limits inverted", m.cmd_limits,   ns(channel=3, min=100.0, max=0.0), "exit"),
+    ("limits over 100", m.cmd_limits,   ns(channel=3, min=0.0, max=500.0), "exit"),
     ("fallback",      m.cmd_fallback,   ns(channel=3, percent=35.0), None),
+    ("fallback range", m.cmd_fallback,  ns(channel=3, percent=500.0), "exit"),
+    ("fixed over 100", m.cmd_mode_fixed, ns(channel=3, percent=150.0), "exit"),
+    ("fixed negative", m.cmd_mode_fixed, ns(channel=3, percent=-1.0), "exit"),
     ("boost on",      m.cmd_boost,      ns(channel=6, state="on"), None),
     ("boost off",     m.cmd_boost,      ns(channel=6, state="off"), None),
     ("hold-min off",  m.cmd_holdmin,    ns(channel=6, state="off"), None),
@@ -848,6 +854,74 @@ if bad:
 else:
     print("  ok    channel protection: on/off persists, guard refuses, --force wins")
 
-total = len(CASES) + 30
+# Percentages are bounded in the handler as well as in main(), because the
+# handlers are reachable without going through the CLI. put_be16 must raise on
+# an out-of-range word rather than mask it into a plausible one.
+bad = []
+try:
+    for value in (-1.0, 100.01, 150.0, 700.0, float("nan")):
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                m.cmd_mode_fixed(FakeOcto(), ns(channel=3, percent=value))
+            bad.append("fixed %r was accepted" % value)
+        except SystemExit:
+            pass
+    for off_value in (-1, 0x10000):
+        try:
+            m.put_be16(bytearray(4), 0, off_value)
+            bad.append("put_be16 masked %r instead of raising" % off_value)
+        except ValueError:
+            pass
+    buf = bytearray(4)
+    m.put_be16(buf, 0, 0xFFFF)            # the legitimate top of the range
+    if bytes(buf[:2]) != b"\xff\xff":
+        bad.append("put_be16 mangled 0xFFFF")
+except Exception:
+    bad.append(traceback.format_exc())
+if bad:
+    failures.append(("input bounds", "; ".join(bad)))
+    print("  FAIL  input bounds: %s" % "; ".join(bad))
+else:
+    print("  ok    percentages bounded in-handler; put_be16 raises, never masks")
+
+# Config and backups are written while root but live in the invoking user's
+# home, so a symlink left in place of one must not be followed.
+bad = []
+with tempfile.TemporaryDirectory() as tmp:
+    real_config_path = m.config_path
+    try:
+        victim = os.path.join(tmp, "victim")
+        with open(victim, "w") as fh:
+            fh.write("untouched")
+        link = os.path.join(tmp, "config.json")
+        os.symlink(victim, link)
+        m.config_path = lambda: link
+        try:
+            m.save_config({"protected": [1]})
+            bad.append("save_config wrote through a symlink")
+        except SystemExit:
+            pass
+        try:
+            m.backup(bytearray(BLOBS[m.CTRL_REPORT_ID]), link)
+            bad.append("backup wrote through a symlink")
+        except SystemExit:
+            pass
+        if open(victim).read() != "untouched":
+            bad.append("the symlink target was modified")
+        plain = os.path.join(tmp, "plain.bin")
+        if len(open(m.backup(bytearray(BLOBS[m.CTRL_REPORT_ID]), plain), "rb").read()) \
+                != m.CTRL_REPORT_SIZE:
+            bad.append("a backup to a real path did not round-trip")
+    except Exception:
+        bad.append(traceback.format_exc())
+    finally:
+        m.config_path = real_config_path
+if bad:
+    failures.append(("symlink safety", "; ".join(bad)))
+    print("  FAIL  symlink safety: %s" % "; ".join(bad))
+else:
+    print("  ok    config and backup refuse to write through a symlink")
+
+total = len(CASES) + 32
 print("\n%d/%d passed" % (total - len(failures), total))
 sys.exit(1 if failures else 0)
