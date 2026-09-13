@@ -1,0 +1,5 @@
+last states of charts for display after last change:
+1. system voltage, 5sec
+2. water temperature, 60sec
+3. power consumption, 600sec
+4. flow, 300sec

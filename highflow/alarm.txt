@@ -1,0 +1,9 @@
+alarm ignore range 5-100sec
+
+--- alarm reporting ---
+alarm flow set at 45
+alarm sensor (currently cold point) set at 40
+alarm external sensor set at 45
+alarm water quality set at 30
+alarm ranges flow 0-1000
+alarm ranges cold point, external sensor, water quality 5-100

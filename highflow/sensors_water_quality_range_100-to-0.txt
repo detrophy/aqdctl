@@ -1,0 +1,2 @@
+two set values. 100% value baseline is 12.8, was set to 13.3. 0% value baseline 50.0, set to 50.5.
+Values are displayed in microSievert/cm.
