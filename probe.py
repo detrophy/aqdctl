@@ -32,7 +32,7 @@ for rid, size in REPORTS.items():
     except Exception as e:
         print("report %#04x: FAILED (%s)" % (rid, e)); continue
     blobs[rid] = raw
-    open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+    open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "octo",
                       "report_%02x.bin" % rid), "wb").write(raw)
     stored = struct.unpack_from(">H", raw, len(raw) - 2)[0]
     calc = crc16_usb(raw[1:len(raw) - 2])

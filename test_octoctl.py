@@ -2,7 +2,7 @@
 """Offline smoke test: run every command against captured reports.
 
 Catches undefined names, bad offsets and checksum mistakes without touching
-hardware. Needs report_03.bin and report_08.bin next to it.
+hardware. Reads the Octo captures in octo/.
 """
 import argparse, importlib.util, io, os, sys, tempfile, traceback, contextlib
 
@@ -12,9 +12,9 @@ m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-FIX = os.path.join(HERE, "fixtures")
-BLOBS = {m.CTRL_REPORT_ID: open(os.path.join(FIX, "effects.bin"), "rb").read(),
-         m.LABEL_REPORT_ID: open(os.path.join(FIX, "effects-08.bin"), "rb").read()}
+FIX = os.path.join(HERE, "octo")
+BLOBS = {m.CTRL_REPORT_ID: open(os.path.join(FIX, "03-rgb-controllers-8-to-10-effects.bin"), "rb").read(),
+         m.LABEL_REPORT_ID: open(os.path.join(FIX, "03-rgb-controllers-8-to-10-effects-08.bin"), "rb").read()}
 
 
 class FakeOcto:
@@ -234,7 +234,7 @@ else:
     print("  ok    FF0000 encodes byte-exact to the captured 00 00 ff ff")
 
 # controller 7 must decode to the values Aquasuite reports for it
-ctrl7 = bytearray(open(os.path.join(FIX, "baseline.bin"), "rb").read())
+ctrl7 = bytearray(open(os.path.join(FIX, "04-rgb-controllers-8-to-10-static.bin"), "rb").read())
 base = m.RGB_BASE + m.RGB_STRIDE * 6
 checks = [("port", ctrl7[base + m.RGB_PORT], 1), ("start", ctrl7[base + m.RGB_START], 60),
           ("count", ctrl7[base + m.RGB_COUNT_OFF], 19),
@@ -254,7 +254,7 @@ else:
     print("  ok    controller 7 matches Aquasuite (topology, wave, params, both colours)")
 
 # every effect captured from Aquasuite must decode to the settings entered
-NEW = bytearray(open(os.path.join(FIX, "effects.bin"), "rb").read())
+NEW = bytearray(open(os.path.join(FIX, "03-rgb-controllers-8-to-10-effects.bin"), "rb").read())
 EXPECT = {
     8:  dict(mode=0x05, params={"speed": 40, "count": 4}, flags=0x04,
              colours=["FF0000", "FFFF00", "0081FF", "7F00FF"]),
@@ -290,7 +290,7 @@ else:
     print("  ok    colour change / scanner / rain match Aquasuite (mode, params, flags, colours)")
 
 # the wave capture: predicted fields plus the isolated data-source block
-WAVE = bytearray(open(os.path.join(FIX, "wave.bin"), "rb").read())
+WAVE = bytearray(open(os.path.join(FIX, "06-rgb-wave-with-data-source.bin"), "rb").read())
 wb = m.RGB_BASE + m.RGB_STRIDE * 6
 def _be(buf, o): return (buf[wb + o] << 8) | buf[wb + o + 1]
 wave_checks = [("speed", m.get_param(WAVE, wb, 0), 30),
@@ -310,7 +310,7 @@ else:
     print("  ok    wave capture: params, flags, data source, mapping ranges, filters")
 
 # second wave capture: only the filters and the source-toggle byte moved
-W2 = bytearray(open(os.path.join(FIX, "wave2.bin"), "rb").read())
+W2 = bytearray(open(os.path.join(FIX, "07-rgb-wave-filters-and-source-toggles.bin"), "rb").read())
 w2 = [("filter rise", W2[wb + m.RGB_FILTER_RISE], 11),
       ("filter fall", W2[wb + m.RGB_FILTER_FALL], 16),
       ("source flags", W2[wb + m.RGB_SOURCE_FLAGS], 0xC0),
@@ -329,7 +329,7 @@ else:
     print("  ok    wave capture 2: filters and source toggles isolated to +4, +8, +9")
 
 # third capture: brightness off must clear exactly 0x80 and nothing else
-W3 = bytearray(open(os.path.join(FIX, "wave3.bin"), "rb").read())
+W3 = bytearray(open(os.path.join(FIX, "08-rgb-wave-source-brightness-off.bin"), "rb").read())
 bad = []
 if W3[wb + m.RGB_SOURCE_FLAGS] != 0x40:
     bad.append("source flags %#04x want 0x40" % W3[wb + m.RGB_SOURCE_FLAGS])
@@ -347,25 +347,25 @@ else:
 
 # the four effect sweeps: every mode, parameter set and flag you entered
 SWEEP = [
-    ("effects1.bin", 7,  0x03, [50, 100], 0x00),
-    ("effects1.bin", 8,  0x13, [35, 10, 5, 90, 25], 0x00),
-    ("effects1.bin", 9,  0x01, [], 0x00),
-    ("effects1.bin", 10, 0x02, [60, 80, 5, 20], 0x00),
-    ("effects1.bin", 11, 0x0C, [30, 50, 25], 0x00),
-    ("effects2.bin", 7,  0x05, [40, 2], 0x04),
-    ("effects2.bin", 8,  0x04, [40, 1], 0x06),
-    ("effects2.bin", 9,  0x0B, [30, 40, 1, 2, 80], 0x00),
-    ("effects2.bin", 10, 0x07, [25, 30, 2, 10, 5], 0x00),
-    ("effects2.bin", 11, 0x08, [25, 40, 20], 0x00),
-    ("effects3.bin", 7,  0x09, [25, 40, 20], 0x00),
-    ("effects3.bin", 8,  0x0A, [25, 40, 20, 1], 0x00),
-    ("effects3.bin", 9,  0x0E, [50], 0x00),
-    ("effects3.bin", 10, 0x0F, [40, 4, 25, 30], 0x00),
-    ("effects3.bin", 11, 0x10, [50, 3, 10, 15], 0x10),
-    ("effects4.bin", 7,  0x11, [25, 3, 60, 15], 0x00),
-    ("effects4.bin", 8,  0x12, None, 0x00),
-    ("effects4.bin", 9,  0x0D, None, 0x06),
-    ("effects4.bin", 10, 0x21, None, 0x07),
+    ("09-rgb-effect-catalogue-1.bin", 7,  0x03, [50, 100], 0x00),
+    ("09-rgb-effect-catalogue-1.bin", 8,  0x13, [35, 10, 5, 90, 25], 0x00),
+    ("09-rgb-effect-catalogue-1.bin", 9,  0x01, [], 0x00),
+    ("09-rgb-effect-catalogue-1.bin", 10, 0x02, [60, 80, 5, 20], 0x00),
+    ("09-rgb-effect-catalogue-1.bin", 11, 0x0C, [30, 50, 25], 0x00),
+    ("10-rgb-effect-catalogue-2.bin", 7,  0x05, [40, 2], 0x04),
+    ("10-rgb-effect-catalogue-2.bin", 8,  0x04, [40, 1], 0x06),
+    ("10-rgb-effect-catalogue-2.bin", 9,  0x0B, [30, 40, 1, 2, 80], 0x00),
+    ("10-rgb-effect-catalogue-2.bin", 10, 0x07, [25, 30, 2, 10, 5], 0x00),
+    ("10-rgb-effect-catalogue-2.bin", 11, 0x08, [25, 40, 20], 0x00),
+    ("11-rgb-effect-catalogue-3.bin", 7,  0x09, [25, 40, 20], 0x00),
+    ("11-rgb-effect-catalogue-3.bin", 8,  0x0A, [25, 40, 20, 1], 0x00),
+    ("11-rgb-effect-catalogue-3.bin", 9,  0x0E, [50], 0x00),
+    ("11-rgb-effect-catalogue-3.bin", 10, 0x0F, [40, 4, 25, 30], 0x00),
+    ("11-rgb-effect-catalogue-3.bin", 11, 0x10, [50, 3, 10, 15], 0x10),
+    ("12-rgb-effect-catalogue-4.bin", 7,  0x11, [25, 3, 60, 15], 0x00),
+    ("12-rgb-effect-catalogue-4.bin", 8,  0x12, None, 0x00),
+    ("12-rgb-effect-catalogue-4.bin", 9,  0x0D, None, 0x06),
+    ("12-rgb-effect-catalogue-4.bin", 10, 0x21, None, 0x07),
 ]
 bad = []
 for fname, idx, mode, params, flags in SWEEP:
@@ -387,7 +387,7 @@ else:
     print("  ok    effect sweep: 19 effect ids, params and flags across 4 captures")
 
 # colour gradient is the only capture that distinguishes BE16@+22 from LE16@+23
-grad = bytearray(open(os.path.join(FIX, "effects4.bin"), "rb").read())
+grad = bytearray(open(os.path.join(FIX, "12-rgb-effect-catalogue-4.bin"), "rb").read())
 gb = m.RGB_BASE + m.RGB_STRIDE * 9
 limits = [m.get_param(grad, gb, k) for k in (1, 3, 4, 5, 6)]
 if limits != [1000, 3, 250, 500, 750]:
@@ -397,7 +397,7 @@ else:
     print("  ok    param endianness: gradient limits 250/500/750 prove BE16 at +22")
 
 # a >255 parameter must round-trip through the writer
-rt = bytearray(open(os.path.join(FIX, "effects4.bin"), "rb").read())
+rt = bytearray(open(os.path.join(FIX, "12-rgb-effect-catalogue-4.bin"), "rb").read())
 m.set_param(rt, gb, 4, 1000)
 if m.get_param(rt, gb, 4) != 1000:
     failures.append(("param round-trip", "1000 did not survive set/get"))
@@ -406,9 +406,9 @@ else:
     print("  ok    param round-trip: 1000 survives set/get")
 
 # curve captures: mode id, the 16 points, startup temperature, power window
-CA = bytearray(open(os.path.join(FIX, "fan_curve_auto.bin"), "rb").read())
-CM = bytearray(open(os.path.join(FIX, "fan_curve_man.bin"), "rb").read())
-P2 = bytearray(open(os.path.join(FIX, "profile2_loaded.bin"), "rb").read())
+CA = bytearray(open(os.path.join(FIX, "13-fan-ch7-curve-automatic-setup.bin"), "rb").read())
+CM = bytearray(open(os.path.join(FIX, "14-fan-ch7-curve-manual-setup-writes-nothing.bin"), "rb").read())
+P2 = bytearray(open(os.path.join(FIX, "15-profile-2-loaded.bin"), "rb").read())
 cb = m.channel_base(7)
 bad = []
 if CA[cb + m.OFF_MODE] != m.MODE_CURVE:
@@ -451,7 +451,7 @@ else:
     print("  ok    linear generator reproduces Aquasuite's automatic curve exactly")
 
 # PID block and start-boost bit, from the multi-channel capture
-MF = bytearray(open(os.path.join(FIX, "multi_fan_settings.bin"), "rb").read())
+MF = bytearray(open(os.path.join(FIX, "16-fan-pid-and-boost-several-channels.bin"), "rb").read())
 bad = []
 b5 = m.channel_base(5)   # "user defined": P 1400 I 1200 D 0 reset 4 hysteresis 0.2
 for name, off, scale, want in (("P", m.OFF_PID_P, 1.0, 1400), ("I", m.OFF_PID_I, 1.0, 1200),
@@ -480,7 +480,7 @@ else:
     print("  ok    pid and boost: P/I/D/reset/hysteresis, boost bit, slow/fast presets")
 
 # the source-sensor capture: exactly one byte, and it is the source field
-SRC = bytearray(open(os.path.join(FIX, "channel3_other_sensor.bin"), "rb").read())
+SRC = bytearray(open(os.path.join(FIX, "17-fan-ch3-source-sensor-changed.bin"), "rb").read())
 bad = []
 moved = [i for i in range(len(MF)) if MF[i] != SRC[i] and i < len(MF) - 2]
 if moved != [m.channel_base(3) + m.OFF_SOURCE + 1]:
@@ -501,7 +501,7 @@ else:
     print("  ok    fan source: BE16 at +0x02, 0-based, isolated from the boost bits")
 
 # hold-minimum-power: turning it off must clear exactly bit 0x01 on that channel
-HM = bytearray(open(os.path.join(FIX, "minimum_power_toggle.bin"), "rb").read())
+HM = bytearray(open(os.path.join(FIX, "18-fan-ch6-hold-minimum-power-off.bin"), "rb").read())
 bad = []
 r6 = m.record_base(6)
 if SRC[r6 + m.REC_FLAGS] != 0x03 or HM[r6 + m.REC_FLAGS] != 0x02:
@@ -521,14 +521,14 @@ else:
     print("  ok    hold-min bit 0x01, boost bit intact, chart rpm 5000/2600/2000")
 
 # wave "count": adding every colour slot moved k3 from 1 to 5
-WR = bytearray(open(os.path.join(FIX, "minimum_power_toggle_rgb.bin"), "rb").read())
+WR = bytearray(open(os.path.join(FIX, "19-rgb-switch-on-and-wave-five-colours.bin"), "rb").read())
 w7 = m.RGB_BASE + m.RGB_STRIDE * 6
 used = sum(1 for e in range(1, 6) if any(m.read_entry(WR, 7, e)))
 if m.get_param(WR, w7, 3) != 5 or used != 5:
     failures.append(("wave count", "k3=%d with %d effect colours, want 5/5"
                      % (m.get_param(WR, w7, 3), used)))
     print("  FAIL  wave count: k3=%d, %d colours" % (m.get_param(WR, w7, 3), used))
-elif m.get_param(HM if False else bytearray(open(os.path.join(FIX, "wave.bin"), "rb").read()),
+elif m.get_param(HM if False else bytearray(open(os.path.join(FIX, "06-rgb-wave-with-data-source.bin"), "rb").read()),
                  w7, 3) != 1:
     failures.append(("wave count", "earlier capture should have k3=1"))
     print("  FAIL  wave count: earlier capture k3 != 1")
@@ -536,7 +536,7 @@ else:
     print("  ok    wave k3 is the effect-colour count (1 colour -> 1, 5 -> 5)")
 
 # the RGBpx master switch, and that it is the only byte the toggle moves
-RGBOFF = bytearray(open(os.path.join(FIX, "rgb_off.bin"), "rb").read())
+RGBOFF = bytearray(open(os.path.join(FIX, "20-rgb-switch-off.bin"), "rb").read())
 bad = []
 moved = [i for i in range(len(WR)) if WR[i] != RGBOFF[i] and i < len(WR) - 2]
 if moved != [m.RGB_ENABLE]:
@@ -557,7 +557,7 @@ else:
     print("  ok    rgb master switch at 0x306 (0x00 on / 0x02 off), config preserved")
 
 # linked mode encodes its target in the mode byte
-LK = bytearray(open(os.path.join(FIX, "link_ch6_ch3.bin"), "rb").read())
+LK = bytearray(open(os.path.join(FIX, "21-fan-ch6-follows-ch3.bin"), "rb").read())
 bad = []
 if LK[m.channel_base(6) + m.OFF_MODE] != 0x05:
     bad.append("ch6 mode %#04x want 0x05" % LK[m.channel_base(6) + m.OFF_MODE])
@@ -572,7 +572,7 @@ for value in (0x00, 0x01, 0x02):
 if m.mode_name(0x05) != "follow ch3" or m.mode_name(0x02) != "curve":
     bad.append("mode_name wrong: %r / %r" % (m.mode_name(0x05), m.mode_name(0x02)))
 # curve mode (0x02) must still be distinguishable from a link
-CAA = bytearray(open(os.path.join(FIX, "fan_curve_auto.bin"), "rb").read())
+CAA = bytearray(open(os.path.join(FIX, "13-fan-ch7-curve-automatic-setup.bin"), "rb").read())
 if m.is_linked(CAA[m.channel_base(7) + m.OFF_MODE]):
     bad.append("curve mode misread as a link")
 if bad:
@@ -586,14 +586,14 @@ else:
 # Setting it on five channels moved only the one mode byte that was unlinked in
 # the same session. If a future capture shows override data in report 0x03 or
 # 0x08, this test should fail and the finding be revisited.
-OV = bytearray(open(os.path.join(FIX, "controller_override_fans.bin"), "rb").read())
+OV = bytearray(open(os.path.join(FIX, "22-fan-controller-override-stores-nothing.bin"), "rb").read())
 bad = []
 moved = [i for i in range(len(LK)) if LK[i] != OV[i] and i < len(LK) - 2]
 if moved != [m.channel_base(6) + m.OFF_MODE]:
     bad.append("report 0x03 moved at %s, expected only the ch6 mode byte"
                % [hex(i) for i in moved])
-OV8 = open(os.path.join(FIX, "controller_override_fans-08.bin"), "rb").read()
-LK8 = open(os.path.join(FIX, "link_ch6_ch3-08.bin"), "rb").read()
+OV8 = open(os.path.join(FIX, "22-fan-controller-override-stores-nothing-08.bin"), "rb").read()
+LK8 = open(os.path.join(FIX, "21-fan-ch6-follows-ch3-08.bin"), "rb").read()
 if OV8 != LK8:
     bad.append("report 0x08 changed, so labels are not the only thing it holds")
 if bad:
@@ -603,7 +603,7 @@ else:
     print("  ok    controller override absent from both feature reports (negative result)")
 
 # the five host-DLL effects, and that they are flagged as needing Aquasuite
-SP = bytearray(open(os.path.join(FIX, "special_effects.bin"), "rb").read())
+SP = bytearray(open(os.path.join(FIX, "23-rgb-host-driven-effects.bin"), "rb").read())
 bad = []
 for idx, mode, name in ((7, 0x15, "sound bars"), (8, 0x14, "sound flash"),
                         (9, 0x16, "sound slider"), (10, 0x17, "sound shift"),
@@ -633,7 +633,7 @@ else:
 # global RGB brightness: one byte, u8 over 0..255. The fixture is Aquasuite's
 # slider showing "45", which stored 114; the slider moves one byte per step, so
 # 115 shows as 45 as well. The handler stores the byte nearest the percentage.
-GB = bytearray(open(os.path.join(FIX, "global_brightness_rgb.bin"), "rb").read())
+GB = bytearray(open(os.path.join(FIX, "24-rgb-brightness-45.bin"), "rb").read())
 bad = []
 moved = [i for i in range(len(SP)) if SP[i] != GB[i] and i < len(SP) - 2]
 if moved != [m.RGB_BRIGHTNESS]:
@@ -660,8 +660,8 @@ else:
     print("  ok    global brightness at 0x304, u8 0-255, nearest byte (45%% -> 115)")
 
 # sequence vs colour sequence: flags, counts, and the RGB data source index
-S1 = bytearray(open(os.path.join(FIX, "sequences_1.bin"), "rb").read())
-S2 = bytearray(open(os.path.join(FIX, "sequences_2.bin"), "rb").read())
+S1 = bytearray(open(os.path.join(FIX, "25-rgb-sequence-effects-1.bin"), "rb").read())
+S2 = bytearray(open(os.path.join(FIX, "26-rgb-sequence-effects-2.bin"), "rb").read())
 b7 = m.RGB_BASE + m.RGB_STRIDE * 6      # sequence 0x07
 b8 = m.RGB_BASE + m.RGB_STRIDE * 7      # colour sequence 0x0B
 bad = []
@@ -703,7 +703,7 @@ else:
 
 # +14/+15 are the mapping OUTPUT range, fixed per effect; the input range
 # follows the chosen source (temperature 20..70, flow 0..300)
-WB = bytearray(open(os.path.join(FIX, "wave_breathing.bin"), "rb").read())
+WB = bytearray(open(os.path.join(FIX, "27-rgb-wave-and-breathing-data-source.bin"), "rb").read())
 bad = []
 def blk(idx, lo):
     b = m.RGB_BASE + m.RGB_STRIDE * (idx - 1)
@@ -739,7 +739,7 @@ else:
     print("  ok    +14/+15 are the mapping output range; flow source is index 4")
 
 # colour mode 2 on scanner and laser is flag 0x20 and nothing else
-CM = bytearray(open(os.path.join(FIX, "colour_mode.bin"), "rb").read())
+CM = bytearray(open(os.path.join(FIX, "28-rgb-scanner-and-laser-colour-mode-2.bin"), "rb").read())
 bad = []
 for mode2, mode1, mode, name in ((7, 9, 0x09, "laser"), (8, 10, 0x08, "scanner")):
     ba = m.RGB_BASE + m.RGB_STRIDE * (mode2 - 1)
@@ -785,9 +785,9 @@ else:
 # normally (a service restart fixed it), but the flush itself is still good
 # evidence that 0x65c is the active-profile index, since the index and the
 # profile's RGB-off arrived in the same write.
-PA = bytearray(open(os.path.join(FIX, "probe-a.bin"), "rb").read())
-PB = bytearray(open(os.path.join(FIX, "probe-b.bin"), "rb").read())
-PC = bytearray(open(os.path.join(FIX, "probe-c.bin"), "rb").read())
+PA = bytearray(open(os.path.join(FIX, "35-profile-switch-before.bin"), "rb").read())
+PB = bytearray(open(os.path.join(FIX, "36-profile-2-selected-writes-nothing.bin"), "rb").read())
+PC = bytearray(open(os.path.join(FIX, "37-profile-2-flushed.bin"), "rb").read())
 bad = []
 if PA != PB:
     bad.append("selecting a profile should write nothing, %d bytes moved"
@@ -804,7 +804,7 @@ else:
     print("  ok    profile index 0x65c moves with the profile's own settings")
 
 # labels are single-byte Latin-1, not UTF-8
-UM = bytearray(open(os.path.join(FIX, "umlaut-08.bin"), "rb").read())
+UM = bytearray(open(os.path.join(FIX, "39-name-fan7-with-umlaut-08.bin"), "rb").read())
 bad = []
 slot = m.LABEL_GROUPS["fan"][0] + m.LABEL_SIZE * 6
 raw = bytes(UM[slot:slot + m.LABEL_SIZE]).split(b"\x00")[0]
