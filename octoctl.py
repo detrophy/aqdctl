@@ -32,6 +32,12 @@ LABEL_REPORT_SIZE = 1013
 # Report ids and payload sizes come from the device's HID report descriptor.
 REPORT_SIZES = {CTRL_REPORT_ID: CTRL_REPORT_SIZE,
                 LABEL_REPORT_ID: LABEL_REPORT_SIZE}
+# Report 0x02 is a command frame: byte 4 is the command, bytes 9-10 a
+# CRC-16/USB over bytes 1-8, stored big-endian like every other checksum here.
+# Command 0x02 follows every settings write. A USB capture of Aquasuite on the
+# high flow NEXT, which shares the frame, shows it sent as an *output* report
+# (the descriptor declares 0x02 as output on both devices), a few seconds after
+# the last settings write and never after a name write.
 SECONDARY_CTRL_REPORT = bytes([0x02, 0x00, 0x00, 0x00, 0x02,
                                0x00, 0x00, 0x00, 0x00, 0x34, 0xC6])
 CTRL_REPORT_DELAY = 0.2           # s; the kernel driver enforces the same gap
@@ -554,8 +560,9 @@ class Octo:
         return bytearray(buf)
 
     def write(self, buf):
-        """Send a resealed control report, then the commit report the official
-        software sends after every change."""
+        """Send a resealed report. After a settings report, also send the
+        command Aquasuite sends after every settings change; after a name
+        report it sends nothing, and neither does this."""
         stored, computed = report_crc(buf)
         if stored != computed:
             sys.exit("Refusing to send a report with a stale checksum (internal error).")
@@ -563,11 +570,19 @@ class Octo:
         if self.dev.send_feature_report(bytes(buf)) < 0:
             sys.exit("send_feature_report failed.")
         self._last_op = time.monotonic()
+        if buf[0] != CTRL_REPORT_ID:
+            return
+        # An output report, as declared and as Aquasuite sends it. The HID
+        # interface has no interrupt OUT endpoint, so hidraw delivers this as a
+        # SET_REPORT(output) control transfer - what the capture shows. The
+        # result is checked: python-hidapi reports failure by returning -1, not
+        # by raising.
         self._pace()
-        try:
-            self.dev.send_feature_report(SECONDARY_CTRL_REPORT)
-        except Exception:
-            self.dev.write(SECONDARY_CTRL_REPORT)   # some builds route it as output
+        if self.dev.write(SECONDARY_CTRL_REPORT) < 0:
+            sys.exit("The settings report was written, but report 0x02, which "
+                     "Aquasuite sends after\nevery settings change, failed. The "
+                     "change is active; it may not survive a power\ncycle. Run "
+                     "the command again to retry.")
         self._last_op = time.monotonic()
 
 
@@ -1184,8 +1199,11 @@ def cmd_rgb_brightness(octo, args):
     buf = octo.read()
     if not 0 <= args.percent <= 100:
         sys.exit("Brightness is a percentage, 0-100.")
-    # Aquasuite truncates rather than rounds: its "45" stores 114, not 115.
-    raw = min(255, int(args.percent * 255 / 100.0))
+    # Aquasuite's slider moves one byte per step and shows the nearest whole
+    # percentage, so its "45" is 114 or 115 depending on where the slider
+    # stopped (captured on both the Octo and the high flow NEXT). There is no
+    # conversion rule to copy; store the byte nearest the requested percentage.
+    raw = int(args.percent * 255 / 100.0 + 0.5)
     after = bytearray(buf)
     after[RGB_BRIGHTNESS] = raw
     reseal(after)

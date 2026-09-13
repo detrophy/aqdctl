@@ -630,7 +630,9 @@ if bad:
 else:
     print("  ok    host-driven effects 0x14-0x18 named and flagged")
 
-# global RGB brightness: one byte, u8 over 0..255, Aquasuite's "45" == 114
+# global RGB brightness: one byte, u8 over 0..255. The fixture is Aquasuite's
+# slider showing "45", which stored 114; the slider moves one byte per step, so
+# 115 shows as 45 as well. The handler stores the byte nearest the percentage.
 GB = bytearray(open(os.path.join(FIX, "global_brightness_rgb.bin"), "rb").read())
 bad = []
 moved = [i for i in range(len(SP)) if SP[i] != GB[i] and i < len(SP) - 2]
@@ -641,15 +643,21 @@ if SP[m.RGB_BRIGHTNESS] != 255 or GB[m.RGB_BRIGHTNESS] != 114:
                % (SP[m.RGB_BRIGHTNESS], GB[m.RGB_BRIGHTNESS]))
 if abs(GB[m.RGB_BRIGHTNESS] * 100.0 / 255 - 44.7) > 0.05:
     bad.append("114/255 should read as 44.7%")
-if min(255, int(45 * 255 / 100.0)) != 114:
-    bad.append("writing 45% must produce 114 (Aquasuite truncates)")
-if min(255, int(100 * 255 / 100.0)) != 255:
-    bad.append("100% must produce 255")
+for percent, want in ((45.0, 115), (44.7, 114), (0.0, 0), (100.0, 255)):
+    fake = FakeOcto()
+    with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
+        m.cmd_rgb_brightness(fake, ns(percent=percent, dry_run=False,
+                                      backup=os.path.join(tmp, "b.bin")))
+    # the fixture already holds 255, so 100% must write nothing at all
+    got = fake.written[-1][m.RGB_BRIGHTNESS] if fake.written else \
+        BLOBS[m.CTRL_REPORT_ID][m.RGB_BRIGHTNESS]
+    if got != want:
+        bad.append("%g%% stored %d, want %d" % (percent, got, want))
 if bad:
     failures.append(("global brightness", "; ".join(bad)))
     print("  FAIL  global brightness: %s" % "; ".join(bad))
 else:
-    print("  ok    global brightness at 0x304, u8 0-255 (45%% -> 114 -> 44.7%%)")
+    print("  ok    global brightness at 0x304, u8 0-255, nearest byte (45%% -> 115)")
 
 # sequence vs colour sequence: flags, counts, and the RGB data source index
 S1 = bytearray(open(os.path.join(FIX, "sequences_1.bin"), "rb").read())
@@ -922,6 +930,53 @@ if bad:
 else:
     print("  ok    config and backup refuse to write through a symlink")
 
-total = len(CASES) + 32
+# Octo.write is the one path the fake device replaces everywhere else, so it
+# gets its own check against a recording stand-in for the hidapi handle: the
+# settings report goes out as a feature report followed by the command frame as
+# an output report, a name report is followed by nothing, and a failed
+# follow-up stops with an error instead of passing silently.
+class RecordingHid:
+    def __init__(self, fail_output=False):
+        self.calls, self.fail_output = [], fail_output
+    def send_feature_report(self, data):
+        self.calls.append(("feature", bytes(data)))
+        return len(data)
+    def write(self, data):
+        self.calls.append(("output", bytes(data)))
+        return -1 if self.fail_output else len(data)
+bad = []
+saved_delay, m.CTRL_REPORT_DELAY = m.CTRL_REPORT_DELAY, 0
+try:
+    ctrl = bytearray(BLOBS[m.CTRL_REPORT_ID])
+    names = bytearray(BLOBS[m.LABEL_REPORT_ID])
+    octo = m.Octo("recording")
+    octo.dev = RecordingHid()
+    octo.write(ctrl)
+    if octo.dev.calls != [("feature", bytes(ctrl)), ("output", m.SECONDARY_CTRL_REPORT)]:
+        bad.append("settings write sent %s" % [(k, len(d)) for k, d in octo.dev.calls])
+    octo.dev = RecordingHid()
+    octo.write(names)
+    if octo.dev.calls != [("feature", bytes(names))]:
+        bad.append("name write sent %s" % [(k, len(d)) for k, d in octo.dev.calls])
+    octo.dev = RecordingHid(fail_output=True)
+    try:
+        octo.write(ctrl)
+        bad.append("a failed report 0x02 passed silently")
+    except SystemExit:
+        pass
+    frame = m.SECONDARY_CTRL_REPORT
+    if int.from_bytes(frame[9:11], "big") != m.crc16_usb(frame[1:9]):
+        bad.append("command frame checksum is not CRC-16/USB over bytes 1-8")
+except Exception:
+    bad.append(traceback.format_exc())
+finally:
+    m.CTRL_REPORT_DELAY = saved_delay
+if bad:
+    failures.append(("write path", "; ".join(bad)))
+    print("  FAIL  write path: %s" % "; ".join(bad))
+else:
+    print("  ok    write path: feature 0x03 then output 0x02; names alone; failures stop")
+
+total = len(CASES) + 33
 print("\n%d/%d passed" % (total - len(failures), total))
 sys.exit(1 if failures else 0)
