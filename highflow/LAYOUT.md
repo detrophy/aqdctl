@@ -10,18 +10,21 @@ Offsets are absolute byte positions, with the report id at offset 0.
 Multi-byte values are big-endian. **Confirmed** means a capture that changed
 one setting moved exactly that value. Everything else is marked as unconfirmed.
 
-Capture method: each capture changes one setting and undoes the previous
-change. Some `display_*` captures do not undo it, and some undo it without
-restoring the original value. Diff each capture against the one taken just
-before it, never against `baseline`.
+Capture method: captures are numbered in the order they were taken. Git
+does not keep file times, so the order is in the name. Each capture changes
+one setting and undoes the previous change. Some `*-display-*` captures do
+not undo it, and some undo it without restoring the original value. Diff each
+capture against the one numbered just before it, never against
+`01-baseline`. A `.txt` file with the same number records what the name
+cannot.
 
-USB captures of Aquasuite itself (USBPcap, in `../USBPCAP/`) show how it
+USB captures of Aquasuite itself (USBPcap, in `../usb-captures/`) show how it
 talks to the device; see "How Aquasuite writes".
 
 Scrubbed before publication:
 
 - Both devices' serial numbers (report 0x01, bytes 0x03–0x06) are zeroed
-  in every capture: `input-01.log` and all of `../USBPCAP/`.
+  in every capture: `85-live-readings-01.log` and all of `../usb-captures/`.
 - The pcapng headers no longer carry the capture host's hardware and
   operating system strings.
 - Nothing else was changed. The settings, name and framebuffer reports
@@ -45,7 +48,7 @@ Ids and sizes come from the HID report descriptor
 big-endian in the last two bytes. This is the Octo's scheme; octoctl's
 `crc16_usb` and `reseal` apply unchanged. Report 0x0c has no checksum.
 
-`idle` (no change made) left 0x03 and 0x08 byte-identical, so neither report
+`02-idle-no-change` (no change made) left 0x03 and 0x08 byte-identical, so neither report
 contains values that change on their own.
 
 
@@ -55,14 +58,14 @@ contains values that change on their own.
 
 | Offset | Type        | Meaning                                                   | Capture                     |
 |--------|-------------|-----------------------------------------------------------|-----------------------------|
-| 0x003  | u8          | temperature unit: 0 °C, 1 °F                              | `display_temp-unit-*`       |
-| 0x004  | u8          | flow and volume unit on the display: 0 litres, 2 US gallons | `display_flow-unit-*` |
-| 0x006  | u8          | seconds between page changes; 61 = off                    | `display_next-page-*`, `display_disable-*` |
-| 0x009  | u16         | active pages, bit n−1 = page n                            | `display_pages_active-*`    |
-| 0x00f  | u8          | brightness: 0 high, 1 medium, 2 low                       | `display_brightness_*`      |
-| 0x010  | u8          | idle brightness: 0 high, 1 medium, 2 low, 3 off           | `display_brightness_idle-*` |
-| 0x015  | bits        | 0x01 rotate, 0x04 invert, 0x08 auto-invert, 0x10 device keys disabled, 0x20 menu locked | `display_rotate-on` … `display_lock-menu` |
-| 0x016  | 4 × (u16, u16) | charts 1–4: source, then interval                      | `display_charts_*`          |
+| 0x003  | u8          | temperature unit: 0 °C, 1 °F                              | `22-display-temperature-unit-celsius-to-fahrenheit`       |
+| 0x004  | u8          | flow and volume unit on the display: 0 litres, 2 US gallons | `23-display-flow-unit-litres-to-gallons` |
+| 0x006  | u8          | seconds between page changes; 61 = off                    | `15-display-page-interval-5s-to-10s`, `16-display-page-change-off` |
+| 0x009  | u16         | active pages, bit n−1 = page n                            | `*-display-pages-*`    |
+| 0x00f  | u8          | brightness: 0 high, 1 medium, 2 low                       | `*-display-brightness-*`      |
+| 0x010  | u8          | idle brightness: 0 high, 1 medium, 2 low, 3 off           | `*-display-idle-brightness-*` |
+| 0x015  | bits        | 0x01 rotate, 0x04 invert, 0x08 auto-invert, 0x10 device keys disabled, 0x20 menu locked | `17-display-rotate-on` … `21-display-lock-menu-checked` |
+| 0x016  | 4 × (u16, u16) | charts 1–4: source, then interval                      | `*-display-chart*`          |
 
 - 0x004: Aquasuite offers only litres and gallons, and never writes 1. A
   writer must not write 1 either.
@@ -74,7 +77,7 @@ contains values that change on their own.
 - 0x009: baseline 0x0006, i.e. pages 2 and 3.
 - Aquasuite's own writes match the 0x009 and 0x010 entries: switching page 4
   on set bit 0x08, and idle brightness "low" wrote 2 over 3
-  (`hfn_display-set-brightness-when-idle-low-…` in `../USBPCAP/`).
+  (`09-highflow-display-idle-brightness-low-and-page-4-on` in `../usb-captures/`).
 - 0x015: baseline 0x08, auto-invert on. Bit 0x02 is unknown.
 
 **Chart source:** 0 flow, 1 internal temperature, 2 external temperature,
@@ -90,7 +93,7 @@ titles on the rendered chart pages confirm 0, 1 and 5.
 Tenths of a second, except 0.5 s, which is stored as 1 rather than 5. Write
 only these eight values: because of the exception, the device's rule for any
 other value is unknown. Charts 3 and 4 held 1 at baseline. 1 s and 30 s are
-from `display_charts_1-1s_charts_2-30s-interval`.
+from `68-display-chart1-1s-chart2-30s`.
 
 **Pages** (0x009), identified from report 0x0c in each single-page capture:
 
@@ -109,14 +112,14 @@ from `display_charts_1-1s_charts_2-30s-interval`.
 
 | Offset | Type      | Meaning                                                   | Capture                        |
 |--------|-----------|-----------------------------------------------------------|--------------------------------|
-| 0x02b  | s16       | internal temperature offset, 0.01 °C (−0.5 → 0xffce)      | `sensor_offset-*`              |
-| 0x02d  | s16       | external temperature offset, 0.01 °C (−0.8 → −1.3 = −80 → −130) | `sensors_ext-sensor-offset-*` |
-| 0x02f  | u8        | coolant: 0 DP Ultra, 1 distilled water                    | `flow_calculation_medium_*`    |
-| 0x030  | u8        | connector: 0 larger than 7 mm, 1 smaller than 7 mm        | `flow_calculation_connector_*` |
-| 0x031  | 10 × s16  | manual calibration, correction per point, ×100 (−1 → −100) | `flow_calculation_manual-*`   |
+| 0x02b  | s16       | internal temperature offset, 0.01 °C (−0.5 → 0xffce)      | `09-internal-sensor-offset-0-to-minus-0.5`              |
+| 0x02d  | s16       | external temperature offset, 0.01 °C (−0.8 → −1.3 = −80 → −130) | `69-external-sensor-offset-minus-0.8-to-minus-1.3` |
+| 0x02f  | u8        | coolant: 0 DP Ultra, 1 distilled water                    | `06-flow-coolant-dp-ultra-to-distilled`    |
+| 0x030  | u8        | connector: 0 larger than 7 mm, 1 smaller than 7 mm        | `07-flow-connector-over-7mm-to-under-7mm` |
+| 0x031  | 10 × s16  | manual calibration, correction per point, ×100 (−1 → −100) | `08-flow-manual-calibration-set`   |
 | 0x045  | 10 × u16  | calibration points, dL/h: 200 … 3000 = 20 … 300 l/h       | content matches Aquasuite      |
-| 0x292  | u16       | water quality 100 % point, 0.1 µS/cm (12.8 → 13.3)        | `sensors_water_quality_*`      |
-| 0x294  | u16       | water quality 0 % point, 0.1 µS/cm (50.0 → 50.5)          | `sensors_water_quality_*`      |
+| 0x292  | u16       | water quality 100 % point, 0.1 µS/cm (12.8 → 13.3)        | `05-water-quality-range-12.8-50.0-to-13.3-50.5`      |
+| 0x294  | u16       | water quality 0 % point, 0.1 µS/cm (50.0 → 50.5)          | `05-water-quality-range-12.8-50.0-to-13.3-50.5`      |
 
 - 0x02b is the internal sensor by elimination, since 0x02d is the external
   one.
@@ -137,9 +140,9 @@ against live values: predicted 85.48 %, device 85.49 %.
 
 | Offset | Type     | Meaning                                                  | Capture         |
 |--------|----------|----------------------------------------------------------|-----------------|
-| 0x059  | u8       | brightness, 0–255                                        | `brightness-45` |
+| 0x059  | u8       | brightness, 0–255                                        | `04-rgb-brightness-45` |
 | 0x05a  | u8       | 0, unknown                                               | —               |
-| 0x05b  | u8       | on/off: 0x00 on, 0x02 off                                | `rgb-on`        |
+| 0x05b  | u8       | on/off: 0x00 on, 0x02 off                                | `03-rgb-switch-on`        |
 | 0x05c  | 8 × 70 B | controllers, in the Octo's slot format                   | octoctl decoder |
 
 - 0x059: Aquasuite's slider moves one byte per step on both devices (High
@@ -153,7 +156,7 @@ against live values: predicted 85.48 %, device 85.49 %.
   byte.
 - 0x05b: the same inverted sense as the Octo.
 - 0x05c: port byte 0 is channel 1, the external header (up to 90 LEDs).
-  Port byte 1 is channel 2, the built-in LEDs on top (10). `rgb-on` lit the
+  Port byte 1 is channel 2, the built-in LEDs on top (10). `03-rgb-switch-on` lit the
   external strip, and the only active controller is on port 0.
 - Brightness and the on/off byte sit 3 and 1 bytes before the controller
   block, the same as on the Octo.
@@ -162,10 +165,10 @@ against live values: predicted 85.48 %, device 85.49 %.
 
 | Offset | Type | Meaning                                                  | Capture                     |
 |--------|------|----------------------------------------------------------|-----------------------------|
-| 0x027  | u8   | allow exceeding the USB spec: 0 / 1                      | `system_allow-exceed-*`     |
-| 0x028  | u16  | USB current limit, mA: 500 default, 2000 at the slider's top | `system_allow-exceed-*` |
-| 0x02a  | u8   | aquabus address, baseline 58                             | `system_aquabus-address-*`  |
-| 0x28d  | bits | standby flags, see below                                 | `system_standby_*`          |
+| 0x027  | u8   | allow exceeding the USB spec: 0 / 1                      | `*-usb-*`     |
+| 0x028  | u16  | USB current limit, mA: 500 default, 2000 at the slider's top | `*-usb-*` |
+| 0x02a  | u8   | aquabus address, baseline 58                             | `*-aquabus-address-*`  |
+| 0x28d  | bits | standby flags, see below                                 | `*standby-*`          |
 
 0x28d flags (baseline 0xf3):
 
@@ -183,14 +186,14 @@ and refuse anything above 500 unless 0x027 is set.
 
 | Offset | Type | Meaning                                                    | Capture                     |
 |--------|------|------------------------------------------------------------|-----------------------------|
-| 0x29a  | bits | alarm actions, see below                                   | `alarms_activate-buzzer-*`, `alarms_show-alarms-*`, `alarms_disable-fan-*` |
-| 0x29b  | bits | alarms enabled, see below                                  | `alarms_reporting_*`        |
-| 0x29d  | u8   | ignore alarms after startup, seconds, 5–100 (baseline 15)  | `alarms_ignore-*`           |
-| 0x29e  | u16  | flow alarm limit, dL/h: 0–1000 l/h = 0–10000 (baseline 450 = 45 l/h) | values match `alarm.txt` |
-| 0x2a0  | u16  | temperature sensor alarm limit, 0.01 °C, 5–100 °C (baseline 4000) | values match `alarm.txt` |
-| 0x2a2  | u16  | external sensor alarm limit, 0.01 °C, 5–100 °C (baseline 4500) | `alarm.txt`, alarm screen |
-| 0x2a4  | u16  | water quality alarm limit, 0.01 %, 5–100 % (baseline 3000) | values match `alarm.txt`   |
-| 0x2a6  | u8   | signal output mode, see below (baseline 1)                 | `alarms_signal-*`           |
+| 0x29a  | bits | alarm actions, see below                                   | `70-alarm-activate-buzzer-unchecked`, `71-alarm-blink-internal-led-red-unchecked`, `73-alarm-disable-fan-flow-signal-unchecked` |
+| 0x29b  | bits | alarms enabled, see below                                  | `8?-alarm-*`        |
+| 0x29d  | u8   | ignore alarms after startup, seconds, 5–100 (baseline 15)  | `72-alarm-startup-delay-15s-to-10s`           |
+| 0x29e  | u16  | flow alarm limit, dL/h: 0–1000 l/h = 0–10000 (baseline 450 = 45 l/h) | values match `84-alarm-limits-and-ranges.txt` |
+| 0x2a0  | u16  | temperature sensor alarm limit, 0.01 °C, 5–100 °C (baseline 4000) | values match `84-alarm-limits-and-ranges.txt` |
+| 0x2a2  | u16  | external sensor alarm limit, 0.01 °C, 5–100 °C (baseline 4500) | `84-alarm-limits-and-ranges.txt`, alarm screen |
+| 0x2a4  | u16  | water quality alarm limit, 0.01 %, 5–100 % (baseline 3000) | values match `84-alarm-limits-and-ranges.txt`   |
+| 0x2a6  | u8   | signal output mode, see below (baseline 1)                 | `*-signal-output-*`           |
 
 0x29a, alarm actions (baseline 0xe0, all three on):
 
@@ -223,7 +226,7 @@ Notes:
 - 0x29d: 0x29c is 0, so the field may be a u16. For 5–100 the two are
   identical.
 - No capture moved the four limits. Their positions come from four distinct
-  values matching `alarm.txt`, in the note's order and in the order of the
+  values matching `84-alarm-limits-and-ranges.txt`, in the note's order and in the order of the
   0x29b bits. The alarm screen showed the external sensor's limit as 45 °C.
 - The temperature sensor alarm always uses the internal sensor. Aquasuite
   offers no selection.
@@ -247,7 +250,7 @@ Notes:
 ## 0x01: live readings
 
 The device sends this report on its own, once a second. It carries no
-checksum. `input-01.log` holds 11 consecutive reports, recorded passively
+checksum. `85-live-readings-01.log` holds 11 consecutive reports, recorded passively
 (nothing was sent to the device), with the kernel driver's hwmon readings
 beside each one. 0x7fff marks a reading that is not available.
 
@@ -339,7 +342,7 @@ NUL-padded Latin-1 (3 + 32 × 24 = 771, the checksum offset). The Octo has
 
 ## How Aquasuite writes
 
-Taken from the captures in `../USBPCAP/`.
+Taken from the captures in `../usb-captures/`.
 
 - **Settings (0x03) and names (0x08):** a SET_REPORT (feature) control
   transfer carrying the whole report with a valid checksum. It differs from
@@ -364,12 +367,12 @@ Taken from the captures in `../USBPCAP/`.
 
 - **Command 0x02** follows report 0x03 writes, about 3.8 s after the *last*
   one (3.62–3.84 s across all captures). The Octo gets the same frame as an output report, 3.84 s after its
-  settings write (`OCTO_rgb_brightness-100-to-99_10sec-wait-after-set`). Several quick changes get a single 0x02. It never follows a name write.
+  settings write (`07-octo-rgb-brightness-100-to-99-then-10s-idle`). Several quick changes get a single 0x02. It never follows a name write.
 - **A setting takes effect at the settings write, not at command 0x02.**
   - An internal offset of +1.00 appeared in the next report 0x01, 0.83 s
     after the write and 3 s before the 0x02.
   - Setting it back to 0 showed up 0.15 s after that write.
-  - Source: `hfn_internal-sensor-offset-0-to-1-to-0-10sec-or-more-wait-in-between`.
+  - Source: `08-highflow-internal-sensor-offset-0-to-1-to-0`.
   - So 0x02 applies nothing. It is presumably the save to flash, which
     Aquasuite delays until changes stop. Only a power-cycle test would prove
     the save.
@@ -388,7 +391,7 @@ Taken from the captures in `../USBPCAP/`.
 - **USB current limit:** see System.
 - **Alarms fire as soon as they are enabled if their condition already
   holds.** Enabling the external sensor alarm with no sensor attached raised
-  it at once (`alarms_reporting_active-alarm-ext-sensor-on-alarming`).
+  it at once (`84-alarm-external-temperature-on-alarming`).
   Before a writer enables an alarm or changes a limit, it must check the
   live readings (hwmon). It must refuse, or ask for explicit confirmation,
   when the sensor reads nothing or the limit is already crossed.

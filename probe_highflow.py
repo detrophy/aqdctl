@@ -28,6 +28,9 @@ pushes these reports on its own, and hidraw hands every reader a copy, so the
 kernel driver keeps receiving them as before.
 
 Files are owned by the invoking user. Existing captures are never overwritten.
+
+Name captures NN-description, numbered in the order taken: git does not keep
+file times, and each capture is meant to be diffed against the one before it.
 """
 import glob, os, pwd, struct, sys, time
 
