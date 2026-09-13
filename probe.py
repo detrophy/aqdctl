@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Read-only discovery: control report 0x03 (RGBpx region) + unknown report 0x08.
 Issues GET_REPORT only. Writes nothing to the device."""
-import struct, sys, hid
+import os, struct, sys, hid
 
 VID, PID = 0x0C70, 0xF011
 REPORTS = {0x03: 1631, 0x08: 1013}          # sizes from the HID report descriptor
@@ -32,7 +32,8 @@ for rid, size in REPORTS.items():
     except Exception as e:
         print("report %#04x: FAILED (%s)" % (rid, e)); continue
     blobs[rid] = raw
-    open("/home/detrophy/octoctl/report_%02x.bin" % rid, "wb").write(raw)
+    open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                      "report_%02x.bin" % rid), "wb").write(raw)
     stored = struct.unpack_from(">H", raw, len(raw) - 2)[0]
     calc = crc16_usb(raw[1:len(raw) - 2])
     print("report %#04x: %d bytes, id=%#04x, trailing CRC %s (stored %#06x / calc %#06x)"
