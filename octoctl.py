@@ -34,10 +34,10 @@ REPORT_SIZES = {CTRL_REPORT_ID: CTRL_REPORT_SIZE,
                 LABEL_REPORT_ID: LABEL_REPORT_SIZE}
 # Report 0x02 is a command frame: byte 4 is the command, bytes 9-10 a
 # CRC-16/USB over bytes 1-8, stored big-endian like every other checksum here.
-# Command 0x02 follows every settings write. A USB capture of Aquasuite on the
-# high flow NEXT, which shares the frame, shows it sent as an *output* report
-# (the descriptor declares 0x02 as output on both devices), a few seconds after
-# the last settings write and never after a name write.
+# Command 0x02 follows every settings write. USB captures of Aquasuite show it
+# sent to the Octo as an *output* report (as the descriptor declares it), 3.8 s
+# after the last settings write. On the high flow NEXT, which uses the same
+# frame, it also never follows a name write.
 SECONDARY_CTRL_REPORT = bytes([0x02, 0x00, 0x00, 0x00, 0x02,
                                0x00, 0x00, 0x00, 0x00, 0x34, 0xC6])
 CTRL_REPORT_DELAY = 0.2           # s; the kernel driver enforces the same gap
@@ -1199,10 +1199,11 @@ def cmd_rgb_brightness(octo, args):
     buf = octo.read()
     if not 0 <= args.percent <= 100:
         sys.exit("Brightness is a percentage, 0-100.")
-    # Aquasuite's slider moves one byte per step and shows the nearest whole
-    # percentage, so its "45" is 114 or 115 depending on where the slider
-    # stopped (captured on both the Octo and the high flow NEXT). There is no
-    # conversion rule to copy; store the byte nearest the requested percentage.
+    # Aquasuite's slider moves one byte per step (captured on both the Octo and
+    # the high flow NEXT) and shows a whole percentage, so one shown value
+    # covers several bytes: its "45" stored 114 on the Octo and 115 on the high
+    # flow NEXT. There is no conversion rule to copy; store the byte nearest the
+    # requested percentage.
     raw = int(args.percent * 255 / 100.0 + 0.5)
     after = bytearray(buf)
     after[RGB_BRIGHTNESS] = raw
