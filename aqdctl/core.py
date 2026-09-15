@@ -23,6 +23,10 @@ COMMAND_REPORT_ID = 0x02    # command frames, see command_frame()
 CTRL_REPORT_ID = 0x03       # settings
 LABEL_REPORT_ID = 0x08      # names
 CTRL_REPORT_DELAY = 0.2     # s between requests; the kernel driver keeps the same gap
+# In the live readings of both the Octo and the high flow NEXT (USB captures of
+# Aquasuite, and Aquasuite's device information for the high flow NEXT).
+FIRMWARE_OFFSET = 0x0D
+LIVE_WAIT_MS = 1500         # the device sends its live readings once a second
 
 # A serial as the USB descriptor and Aquasuite give it: two five-digit groups.
 SERIAL_PATTERN = re.compile(r"\d{5}-\d{5}")
@@ -65,6 +69,11 @@ def put_be16(buf, off, val):
     if not 0 <= val <= 0xFFFF:
         raise ValueError("BE16 value %r out of range at offset %#05x" % (val, off))
     struct.pack_into(">H", buf, off, val)
+
+
+def firmware(live):
+    """Firmware version from a live-readings report."""
+    return be16(live, FIRMWARE_OFFSET)
 
 
 def pct(raw):
@@ -322,39 +331,54 @@ class Device:
             sys.exit("Command %#04x failed." % code)
         self._last_op = time.monotonic()
 
-    def read_input(self, size, timeout_ms=2000):
+    def read_input(self, size, timeout_ms=LIVE_WAIT_MS):
         """Wait for one live-readings report. The device sends these on its own;
         hidraw hands every reader a copy, so this sends nothing and the kernel
         driver keeps receiving them as before."""
-        deadline = time.monotonic() + timeout_ms / 1000.0
-        while time.monotonic() < deadline:
-            left = max(1, int((deadline - time.monotonic()) * 1000))
-            buf = bytes(self.dev.read(size, left))
-            if buf[:1] == bytes([INPUT_REPORT_ID]) and len(buf) == size:
-                return buf
-        return None
+        return _await_input(self.dev, size, timeout_ms)
+
+
+def _await_input(handle, size, timeout_ms):
+    deadline = time.monotonic() + timeout_ms / 1000.0
+    while time.monotonic() < deadline:
+        left = max(1, int((deadline - time.monotonic()) * 1000))
+        try:
+            buf = bytes(handle.read(size, left))
+        except (IOError, OSError, ValueError):
+            return None
+        if buf[:1] == bytes([INPUT_REPORT_ID]) and len(buf) == size:
+            return buf
+    return None
 
 
 def peek(found, report_id):
-    """Read one report from a device that has not been selected, for the device
-    list only. Returns None, instead of exiting, when it cannot be opened."""
+    """Read from a device that has not been selected, for the device list only:
+    feature report `report_id` and one live-readings report. Returns (report,
+    live report), each None when it cannot be had. Never exits, so one device
+    that cannot be opened does not hide the others."""
     if hid is None:
-        return None
-    size = found.kind.REPORT_SIZES[report_id]
+        return None, None
     probe = hid.device()
     try:
         probe.open_path(found.path)
-        buf = bytes(probe.get_feature_report(report_id, size))
     except (IOError, OSError, ValueError):
-        return None
+        return None, None
+    report = None
+    try:
+        size = found.kind.REPORT_SIZES[report_id]
+        try:
+            buf = bytes(probe.get_feature_report(report_id, size))
+        except (IOError, OSError, ValueError):
+            buf = b""
+        if len(buf) == size and report_crc(buf)[0] == report_crc(buf)[1]:
+            report = bytearray(buf)
+        live = _await_input(probe, found.kind.INPUT_REPORT_SIZE, LIVE_WAIT_MS)
     finally:
         try:
             probe.close()
         except Exception:
             pass
-    if len(buf) != size or report_crc(buf)[0] != report_crc(buf)[1]:
-        return None
-    return bytearray(buf)
+    return report, live
 
 
 # ------------------------------------------------------------------- write

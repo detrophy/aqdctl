@@ -21,6 +21,7 @@ PRODUCT_ID = 0xF011
 # Report ids and sizes come from the device's HID report descriptor.
 CTRL_REPORT_SIZE = 0x65F          # 1631
 LABEL_REPORT_SIZE = 1013
+INPUT_REPORT_SIZE = 327         # live readings, from USB captures of Aquasuite
 REPORT_SIZES = {core.CTRL_REPORT_ID: CTRL_REPORT_SIZE,
                 core.LABEL_REPORT_ID: LABEL_REPORT_SIZE}
 HAS_FANS = True
@@ -685,12 +686,9 @@ def cmd_protect(dev, args):
     print("stored in %s" % path)
 
 
-def identify(found):
+def identify(labels):
     """A few of the names stored on this Octo, to tell two devices apart."""
-    buf = core.peek(found, core.LABEL_REPORT_ID)
-    if buf is None:
-        return "(run as root, or install the udev rule, to show them)"
-    fans = [n for n in names.decode(buf, NAME_GROUPS)["fan"] if n]
+    fans = [n for n in names.decode(labels, NAME_GROUPS)["fan"] if n]
     text = "fans: " + ", ".join(fans) if fans else "(no fan names set)"
     return text if len(text) <= 60 else text[:57] + "..."
 

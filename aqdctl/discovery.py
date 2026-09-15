@@ -21,8 +21,8 @@ class Found:
 
 def device_kinds():
     """USB product id -> the module describing that device."""
-    from . import octo
-    return {octo.PRODUCT_ID: octo}
+    from . import highflow, octo
+    return {octo.PRODUCT_ID: octo, highflow.PRODUCT_ID: highflow}
 
 
 def attached():
@@ -61,7 +61,8 @@ def hwmon_dir(serial):
     return None
 
 
-def list_devices(found, out=sys.stdout):
+def list_devices(found, out=None):
+    out = out or sys.stdout
     supported = sorted("%s (%04x:%04x)" % (k.TITLE, core.VENDOR_ID, pid)
                        for pid, k in device_kinds().items())
     if not found:
@@ -69,10 +70,19 @@ def list_devices(found, out=sys.stdout):
         print("Supported: %s." % ", ".join(supported), file=out)
         return
     print("Attached devices:", file=out)
-    print("  %-16s %-12s %s" % ("device", "serial", "names stored on it"), file=out)
+    print("  %-16s %-12s %-9s %s" % ("device", "serial", "firmware", "names stored on it"),
+          file=out)
+    unreadable = False
     for f in found:
-        print("  %-16s %-12s %s" % (f.kind.TITLE, f.serial or "(none)",
-                                     f.kind.identify(f)), file=out)
+        labels, live = core.peek(f, core.LABEL_REPORT_ID)
+        unreadable = unreadable or labels is None
+        print("  %-16s %-12s %-9s %s"
+              % (f.kind.TITLE, f.serial or "(none)",
+                 core.firmware(live) if live else "-",
+                 f.kind.identify(labels) if labels is not None else "-"), file=out)
     print(file=out)
+    if unreadable:
+        print("Firmware and names need access to the device: run as root, or install\n"
+              "the udev rule that 'aqdctl --help-udev' prints.\n", file=out)
     print("Every other command takes the serial first, e.g.", file=out)
     print("  aqdctl --device %s info" % (found[0].serial or "SERIAL"), file=out)
