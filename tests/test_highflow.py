@@ -7,12 +7,12 @@ Aquasuite (the file name says which) and undid the one before. So each
 capture's decoded settings must show the named change, and must differ from
 the capture before it only in that change and the undo.
 """
-import argparse, contextlib, glob, io, os, sys, tempfile
+import argparse, builtins, contextlib, glob, io, os, shlex, shutil, sys, tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
-from aqdctl import cli, core, discovery, highflow, names, octo
+from aqdctl import cli, core, discovery, highflow, names, octo, rgbpx
 
 FIX = os.path.join(ROOT, "highflow")
 SERIAL = "12345-67890"          # the fake device's serial
@@ -47,19 +47,25 @@ LIVE = [bytes.fromhex(row[1]) for row in LOG]
 
 
 class FakeHighflow:
-    """Serves captured reports and one live report; records writes."""
+    """Serves captured reports and a live report. Keeps what is written, so
+    the read-back after a write verifies, and records commands. `live` may be
+    a function, called for each live report."""
     kind, serial = highflow, SERIAL
 
     def __init__(self, stem="01-baseline", live=LIVE[0]):
         self.blobs = {core.CTRL_REPORT_ID: capture(stem),
                       core.LABEL_REPORT_ID: capture(stem, core.LABEL_REPORT_ID)}
-        self.live, self.written = live, []
+        self.live, self.written, self.commands = live, [], []
 
     def __enter__(self): return self
     def __exit__(self, *exc): pass
     def read(self, report_id=core.CTRL_REPORT_ID): return bytearray(self.blobs[report_id])
-    def read_input(self, size, timeout_ms=0): return self.live
-    def write(self, buf): self.written.append(bytes(buf))
+    def read_input(self, size, timeout_ms=0):
+        return self.live() if callable(self.live) else self.live
+    def write(self, buf):
+        self.written.append(bytes(buf))
+        self.blobs[buf[0]] = bytearray(buf)
+    def command(self, code): self.commands.append(code)
 
 
 def run(fn, dev, args):
@@ -406,8 +412,8 @@ try:
         bad.append("--device %s info alarm: opened %r" % (HFN, opened))
     for argv, reason in ((["--device", HFN, "fan", "set", "1", "mode", "fixed", "40"],
                           "the high flow NEXT has no fans"),
-                         (["--device", HFN, "restore", "x.bin"],
-                          "no writes in this version")):
+                         (["--device", HFN, "display", "brightness", "dim"],
+                          "not a brightness level")):
         try:
             with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
                 cli.main(argv)
@@ -432,6 +438,433 @@ try:
 finally:
     discovery.attached, core.Device = real_attached, real_device
 check("command line: the device list shows both, --device picks the high flow NEXT", bad)
+
+# ================================================================== writes
+BACKUPS = tempfile.mkdtemp()
+real_data_dir = core.data_dir
+core.data_dir = lambda: BACKUPS       # the pre-write backups land here
+PREFIX = "aqdctl --device %s" % SERIAL
+PARSER = highflow.build_parser(PREFIX)
+
+
+def do(fake, line, answer="y"):
+    """Run one command line against a fake device, as cli.main does once it
+    has chosen the device. Returns (stdout, stderr, exit), exit being the
+    refusal message, or None if the command ran through."""
+    argv = shlex.split(line)
+    args = PARSER.parse_args(argv)
+    args.typed = argv
+    out, err = io.StringIO(), io.StringIO()
+    real_input = builtins.input
+    builtins.input = lambda prompt="": (out.write(prompt), answer)[1]
+    try:
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            args.func(fake, args)
+        code = None
+    except SystemExit as exc:
+        code = exc.code if exc.code else None
+    finally:
+        builtins.input = real_input
+    return out.getvalue(), err.getvalue(), code
+
+
+def flat(text):
+    """Text with its line wrapping undone, for phrase checks."""
+    return " ".join(str(text).split())
+
+
+def changed_bytes(a, b):
+    return {i for i in range(len(a) - 2) if a[i] != b[i]}
+
+
+# ------------------------------------------------------------ capture replay
+# The command that makes each capture's change. Applied to the capture before,
+# it must produce the capture's value and touch no byte the capture left alone.
+REPLAY = {
+    3: "rgb switch on", 4: "rgb brightness 45",
+    5: "sensor water-quality 13.3 50.5", 6: "flow coolant distilled",
+    7: "flow connector under-7mm", 8: "flow calibration -1,1,1,0,0,0,0,0,0,0",
+    9: "sensor offset internal -0.5",
+    10: "display brightness medium", 11: "display brightness high",
+    12: "display idle-brightness low", 13: "display idle-brightness medium",
+    14: "display idle-brightness high", 15: "display page-change 10",
+    16: "display page-change off", 17: "display rotate on", 18: "display invert on",
+    19: "display auto-invert off", 20: "display device-keys off",
+    21: "display menu-lock on", 22: "display units temperature fahrenheit",
+    23: "display units flow gallons",
+    24: "display chart 1 --source flow",
+    25: "display chart 1 --source internal-temperature",
+    26: "display chart 1 --source external-temperature",
+    27: "display chart 1 --source conductivity",
+    28: "display chart 1 --source water-quality",
+    29: "display chart 1 --source power-dissipation",
+    30: "display chart 1 --source system-voltage",
+    31: "display chart 1 --interval 0.5", 32: "display chart 2 --interval 10",
+    33: "display chart 3 --source power-dissipation --interval 600",
+    34: "display chart 4 --source flow --interval 300",
+    51: "display pages 1,16", 52: "display pages 1,5", 53: "display pages 1,3,5",
+    55: "system usb-current 600 --force", 56: "system usb-current 700 --force",
+    57: "system usb-current 2000 --force",
+    58: "system standby when-usb-disconnected off",
+    59: "system standby on-usb-suspend off", 60: "system standby without-aquabus on",
+    61: "system in-standby alarms-off off", 62: "system in-standby display-off off",
+    63: "system in-standby leds-off off", 64: "system in-standby volume-stops off",
+    65: "system aquabus-address 59", 66: "system aquabus-address 60",
+    67: "system aquabus-address 61",
+    68: ["display chart 1 --interval 1", "display chart 2 --interval 30"],
+    69: "sensor offset external -1.3",
+    70: "alarm buzzer off", 71: "alarm blink-led off", 72: "alarm startup-delay 10",
+    73: "alarm stop-signal off",
+    74: "signal-output fan-speed", 75: "signal-output flow-sensor",
+    76: "signal-output fan-speed-from-flow",
+    77: "signal-output power-switch --force", 78: "signal-output on-during-alarm --force",
+    79: "signal-output off-during-alarm --force",
+    80: "alarm flow on --force",            # 79 left the output in off-during-alarm
+    81: "alarm internal off", 82: "alarm external on --force",   # no external sensor
+    83: "alarm water-quality on", 84: "alarm external on --force",
+}
+for n in range(35, 51):
+    REPLAY[n] = "display pages %d" % (n - 34)
+bad = []
+for n in sorted(REPLAY):
+    stem, prior = BY_NUMBER[n], BY_NUMBER[n - 1]
+    fake = FakeHighflow(prior)
+    lines = REPLAY[n] if isinstance(REPLAY[n], list) else [REPLAY[n]]
+    for line in lines:
+        out, err, code = do(fake, line)
+        if code is not None:
+            bad.append("%s: %r refused: %s" % (stem, line, code))
+    if not fake.written:
+        bad.append("%s: %r wrote nothing" % (stem, lines))
+        continue
+    written, target = fake.blobs[core.CTRL_REPORT_ID], capture(stem)
+    got, want = highflow.decode(written), highflow.decode(target)
+    for key in EXPECT[n]:
+        if got[key] != want[key]:
+            bad.append("%s: %r gave %s=%r, the capture has %r" % (stem, lines, key, got[key],
+                                                                  want[key]))
+    extra = changed_bytes(capture(prior), written) - changed_bytes(capture(prior), target)
+    if extra:
+        bad.append("%s: %r also changed %s" % (stem, lines, ", ".join(map(hex, sorted(extra)))))
+    stored, computed = core.report_crc(written)
+    if stored != computed:
+        bad.append("%s: stale checksum" % stem)
+    # Where the replay needed --force, it must be refused without it.
+    for line in lines:
+        if "--force" in line:
+            out, err, code = do(FakeHighflow(prior), line.replace(" --force", ""))
+            if code is None or not str(code).startswith("Nothing written."):
+                bad.append("%s: %r without --force was not refused" % (stem, line))
+check("replay: %d commands reproduce their capture's change, and nothing else"
+      % len(REPLAY), bad)
+
+# --------------------------------------------------------------- USB current
+bad = []
+WARNING = ("[### ATTENTION - DANGEROUS COMMAND ###]\n"
+           "Setting a USB current above 0.5A can lead to damages on\n"
+           "the USB header of the motherboard. The USB spec allows\n"
+           "only for a current 0.5A at maximum. Use at your own risk.\n"
+           "An external power supply should be used for safety.\n")
+fake = FakeHighflow()
+out, err, code = do(fake, "system usb-current 600")
+if code != ("Nothing written. Increasing max current above 500 mA requires --force:\n"
+            "  aqdctl --device %s system usb-current 600 --force" % SERIAL):
+    bad.append("refusal: %r" % code)
+if not err.startswith(WARNING):
+    bad.append("warning on stderr: %r" % err)
+if fake.written or out:
+    bad.append("600 mA without --force wrote %d reports, printed %r" % (len(fake.written), out))
+fake = FakeHighflow()
+out, err, code = do(fake, "system usb-current 600 --force")
+written = fake.written[-1] if fake.written else capture("01-baseline")
+if code is not None or core.be16(written, highflow.USB_CURRENT) != 600 \
+        or written[highflow.USB_OVER_SPEC] != 1:
+    bad.append("600 mA with --force: exit %r, current %d, flag %d"
+               % (code, core.be16(written, highflow.USB_CURRENT),
+                  written[highflow.USB_OVER_SPEC]))
+if not out.startswith(WARNING) or out.index(WARNING) > out.index("Proceed?"):
+    bad.append("with --force the warning must come before the prompt:\n" + out)
+for line in ("system usb-current 2001", "system usb-current 2001 --force",
+             "system usb-current 400 --force", "system usb-current 650 --force"):
+    fake = FakeHighflow()
+    out, err, code = do(fake, line)
+    if code is None or fake.written:
+        bad.append("%r was not refused" % line)
+fake = FakeHighflow(BY_NUMBER[57])            # 2000 mA, over-spec allowed
+out, err, code = do(fake, "system usb-current 500")
+written = fake.written[-1] if fake.written else b""
+if code is not None or not written or core.be16(written, highflow.USB_CURRENT) != 500 \
+        or written[highflow.USB_OVER_SPEC] != 0 or "ATTENTION" in out + err:
+    bad.append("back to 500 mA: exit %r, output %r" % (code, out + err))
+
+
+class Terminal(io.StringIO):
+    def isatty(self): return True
+
+
+tty = Terminal()
+saved = os.environ.pop("NO_COLOR", None)
+core.warn_danger("x", tty)
+os.environ["NO_COLOR"] = "1"
+plain = Terminal()
+core.warn_danger("x", plain)
+os.environ.pop("NO_COLOR")
+if saved is not None:
+    os.environ["NO_COLOR"] = saved
+if tty.getvalue() != "\033[31m[### ATTENTION - DANGEROUS COMMAND ###]\033[0m\nx\n":
+    bad.append("no red header on a terminal: %r" % tty.getvalue())
+if plain.getvalue() != "[### ATTENTION - DANGEROUS COMMAND ###]\nx\n":
+    bad.append("NO_COLOR still coloured: %r" % plain.getvalue())
+help_out = io.StringIO()
+try:
+    with contextlib.redirect_stdout(help_out):
+        PARSER.parse_args(["system", "usb-current", "--help"])
+except SystemExit:
+    pass
+if "500 mA is the USB limit. Values above it need --force: they can damage the " \
+        "motherboard's USB header." not in " ".join(help_out.getvalue().split()):
+    bad.append("usb-current --help lacks the rule:\n" + help_out.getvalue())
+check("USB current: warning, refusal with the command to copy, --force, limits", bad)
+
+# ------------------------------------------------------------ signal output
+bad = []
+for prior, line, refused in (
+        ("01-baseline", "signal-output power-switch", True),
+        ("01-baseline", "signal-output on-during-alarm", True),
+        ("01-baseline", "signal-output off-during-alarm", True),
+        ("01-baseline", "signal-output fan-speed", False),
+        (BY_NUMBER[79], "signal-output fan-speed", True),        # leaving mode 5
+        (BY_NUMBER[79], "signal-output power-switch", True),
+        (BY_NUMBER[77], "alarm buzzer off", True),               # alarm change in mode 3
+        (BY_NUMBER[77], "alarm startup-delay 20", True),
+        (BY_NUMBER[78], "system in-standby alarms-off off", True),
+        (BY_NUMBER[77], "display brightness high", False),       # not an alarm change
+        (BY_NUMBER[77], "system in-standby leds-off off", False),
+        ("01-baseline", "alarm buzzer off", False)):
+    fake = FakeHighflow(prior)
+    out, err, code = do(fake, line)
+    if refused and (code is None or fake.written):
+        bad.append("%s: %r was not refused" % (prior[:2], line))
+    if not refused and (code is not None or not fake.written):
+        bad.append("%s: %r was refused: %s" % (prior[:2], line, code))
+    if refused and code and ("--force:\n  aqdctl --device %s %s --force" % (SERIAL, line)) not in code:
+        bad.append("%s: %r refusal lacks the command to copy: %s" % (prior[:2], line, code))
+check("signal output: power modes, leaving them, and alarm changes in them need --force", bad)
+
+# -------------------------------------------------------------------- alarms
+# LIVE[0]: flow 206.5 l/h, internal 26.16 C, no external sensor, quality 86.83 %.
+bad = []
+for prior, line, refused in (
+        ("01-baseline", "alarm external on", True),              # no reading
+        ("01-baseline", "alarm flow on", False),                 # 206.5 > 45
+        ("01-baseline", "alarm flow on --limit 300", True),      # 206.5 < 300
+        ("01-baseline", "alarm flow --limit 300", False),        # off: only a note
+        ("01-baseline", "alarm internal --limit 20", True),      # on, 26.16 > 20
+        ("01-baseline", "alarm internal --limit 50", False),
+        ("01-baseline", "alarm internal off", False),
+        ("01-baseline", "alarm water-quality on --limit 90", True),   # 86.83 < 90
+        ("01-baseline", "alarm water-quality on --limit 80", False),
+        ("01-baseline", "sensor offset internal 15", True),      # 41.16 > 40
+        ("01-baseline", "sensor offset internal 10", False),
+        (BY_NUMBER[83], "sensor water-quality 12.8 19", True),   # -> 20.97 % < 30
+        (BY_NUMBER[83], "sensor water-quality 12.8 20", False),  # -> 31.94 %
+        ("01-baseline", "alarm flow --limit 1001", True),
+        ("01-baseline", "alarm internal --limit 4", True),
+        ("01-baseline", "alarm startup-delay 4", True),
+        ("01-baseline", "alarm startup-delay 101", True)):
+    fake = FakeHighflow(prior)
+    out, err, code = do(fake, line)
+    if refused and (code is None or fake.written):
+        bad.append("%s: %r was not refused" % (prior[:2], line))
+    if not refused and (code is not None or not fake.written):
+        bad.append("%s: %r was refused: %s" % (prior[:2], line, code))
+out, err, code = do(FakeHighflow(), "alarm flow --limit 300")
+if "note: the flow alarm is off" not in out:
+    bad.append("no note for a crossed limit on a disabled alarm:\n" + out)
+out, err, code = do(FakeHighflow(), "alarm external on")
+if not code or "the external sensor reads nothing" not in flat(code):
+    bad.append("refusal does not say the sensor reads nothing: %r" % code)
+out, err, code = do(FakeHighflow(live=None), "alarm flow on")
+if not code or "no live readings are available" not in flat(code):
+    bad.append("without live readings: %r" % code)
+out, err, code = do(FakeHighflow(), "alarm external on --force")
+if code is not None or "--force: The external alarm would fire at once" not in flat(out):
+    bad.append("--force does not say what it overrides: %r" % out)
+check("alarms: refused when they would fire at once, with or without a reading", bad)
+
+# -------------------------------------------------------------- volume reset
+bad = []
+if core.command_frame(highflow.VOLUME_RESET_COMMAND) != bytes.fromhex("020000006400000000" "3cce"):
+    bad.append("command 0x64 frame differs from the USB capture")
+zeroed = bytearray(LIVE[0])
+for off, value in ((highflow.LIVE_VOLUME, 0), (highflow.LIVE_IMPULSES, 10),
+                   (highflow.LIVE_SINCE_RESET, 1)):
+    zeroed[off:off + 4] = value.to_bytes(4, "big")
+reports = []
+fake = FakeHighflow(live=lambda: reports.pop(0))
+reports[:] = [LIVE[0], bytes(zeroed)]
+out, err, code = do(fake, "volume reset")
+if fake.commands != [0x64] or "1036567 l" not in out or "Reset: 0 l, 10 impulses" not in out:
+    bad.append("reset: commands %r, output %r" % (fake.commands, out))
+fake = FakeHighflow()
+out, err, code = do(fake, "volume reset -y", answer="n")
+if fake.commands or code != "Aborted." or "-y does not apply" not in out:
+    bad.append("-y skipped the question: commands %r, %r" % (fake.commands, out))
+fake = FakeHighflow()
+out, err, code = do(fake, "volume reset --dry-run")
+if fake.commands or "Reset the volume counter?" in out:
+    bad.append("--dry-run sent or asked: %r" % out)
+fake = FakeHighflow(live=None)
+out, err, code = do(fake, "volume reset")
+if fake.commands or not code:
+    bad.append("without a live report the reset was sent")
+check("volume reset: shows the counters, always asks, -y does not skip it", bad)
+
+# ------------------------------------------------------------------ restore
+bad = []
+with tempfile.TemporaryDirectory() as tmp:
+    for stem, refused_for in ((BY_NUMBER[57], "USB current"), (BY_NUMBER[79], "signal output"),
+                              (BY_NUMBER[9], None)):
+        path = os.path.join(tmp, "highflow-%s-03-%s.bin" % (SERIAL, stem[:2]))
+        shutil.copy(os.path.join(FIX, stem + ".bin"), path)
+        fake = FakeHighflow()
+        out, err, code = do(fake, "restore %s" % path)
+        if refused_for and (code is None or fake.written):
+            bad.append("restoring %s went past the %s check" % (stem, refused_for))
+        if not refused_for and (code is not None or not fake.written):
+            bad.append("restoring %s was refused: %s" % (stem, code))
+        fake = FakeHighflow()
+        out, err, code = do(fake, "restore %s --force" % path)
+        if code is not None or bytes(fake.blobs[core.CTRL_REPORT_ID]) != bytes(capture(stem)):
+            bad.append("restoring %s with --force: %s" % (stem, code))
+    out, err, code = do(FakeHighflow(), "restore %s" % os.path.join(tmp, "missing.bin"))
+    if not code or not code.startswith("Cannot read"):
+        bad.append("a missing file: %r" % code)
+check("restore: runs the same safety checks as the commands", bad)
+
+# ---------------------------------------------------------------------- rgb
+bad = []
+layout = highflow.RGB
+
+
+def slot(buf, n):
+    base = layout.slot_base(n)
+    return bytes(buf[base:base + 70])
+
+
+fake = FakeHighflow()
+out, err, code = do(fake, "rgb create 2 pos 1-11 --effect static")
+if code is None or fake.written:
+    bad.append("channel 2 accepted LED 11")
+out, err, code = do(fake, "rgb create 2 pos 1-10 --effect static --colour 0000FF")
+buf = fake.blobs[core.CTRL_REPORT_ID]
+if code or "controller 7 (new) on channel 2" not in out or slot(buf, 7)[:4] != bytes([1, 0, 10, 1]):
+    bad.append("first controller on channel 2: %r %s" % (code, slot(buf, 7)[:4].hex()))
+out, err, code = do(fake, "rgb create 2 pos 1-5 --effect static")
+if not code or "overlap controller 7" not in code:
+    bad.append("overlap on channel 2 not refused: %r" % code)
+do(fake, "rgb set controller 7 pos 1-5")
+out, err, code = do(fake, "rgb create 2 pos 6-10 --effect static")
+if code or "controller 8 (new)" not in out:
+    bad.append("second controller on channel 2: %r" % code)
+do(fake, "rgb set controller 8 pos 6-8")
+out, err, code = do(fake, "rgb create 2 pos 9-10 --effect static")
+if not code or "Channel 2 is full: its controllers 7, 8" not in code:
+    bad.append("third controller on channel 2: %r" % code)
+fake = FakeHighflow()
+out, err, code = do(fake, "rgb create 1 pos 5-12 --effect static")
+if not code or "overlap controller 3" not in code:
+    bad.append("overlap with controller 3 not refused: %r" % code)
+out, err, code = do(fake, "rgb create 1 pos 10-20 --effect static")
+if code or "controller 1 (new) on channel 1, LEDs 10-20" not in out:
+    bad.append("channel 1 did not take its lowest free controller: %r %r" % (code, out))
+fake = FakeHighflow()
+before = capture("01-baseline")
+do(fake, "rgb set controller 3 pos 1-20")
+if changed_bytes(before, fake.blobs[core.CTRL_REPORT_ID]) != {layout.slot_base(3) + 2}:
+    bad.append("resizing changed more than the LED count")
+fake = FakeHighflow()
+do(fake, "rgb remove controller 3")
+if slot(fake.blobs[core.CTRL_REPORT_ID], 3) != rgbpx.empty_slot(layout, 3) \
+        or slot(fake.blobs[core.CTRL_REPORT_ID], 3)[0] != 0:
+    bad.append("removing controller 3 did not empty its slot on channel 1")
+fake = FakeHighflow()
+do(fake, "rgb create 2 pos 1-10 --effect static")
+do(fake, "rgb remove controller 7")
+if slot(fake.blobs[core.CTRL_REPORT_ID], 7)[0] != 1:
+    bad.append("removing controller 7 lost channel 2's port byte")
+fake = FakeHighflow()
+out, err, code = do(fake, "rgb set controller 3 --sensor '#5'")
+if code or core.be16(fake.blobs[core.CTRL_REPORT_ID], layout.slot_base(3) + 6) != 5:
+    bad.append("--sensor '#5': %r" % code)
+out, err, code = do(FakeHighflow(), "rgb set controller 3 --sensor 1")
+if not code or "have not been captured" not in code:
+    bad.append("--sensor 1 was accepted without a known numbering: %r" % code)
+check("rgb: channel 2 holds controllers 7-8 and LEDs 1-10; slots, overlaps, sources", bad)
+
+# -------------------------------------------------------------------- names
+bad = []
+fake = FakeHighflow()
+before = capture("01-baseline", core.LABEL_REPORT_ID)
+do(fake, "name sensor internal 'Loop A'")
+after = fake.blobs[core.LABEL_REPORT_ID]
+if names.read_name(after, 0x183) != "Loop A" or \
+        changed_bytes(before, after) - set(range(0x183, 0x183 + 24)):
+    bad.append("name sensor internal: %r" % names.read_name(after, 0x183))
+do(fake, "name virtual 8 Test")
+if names.read_name(fake.blobs[core.LABEL_REPORT_ID], 0x243 + 7 * 24) != "Test":
+    bad.append("name virtual 8")
+if any(n == core.CTRL_REPORT_ID for n in (w[0] for w in fake.written)):
+    bad.append("a name write touched the settings report")
+check("names: sensor members and software sensors land in their slots", bad)
+
+# ------------------------------------------------------------- command forms
+bad = []
+forms = ["info", "info alarm", "display brightness high", "display brightness",
+         "display idle-brightness off", "display pages 2,3", "display pages",
+         "display page-change off", "display page-change 10", "display rotate on",
+         "display invert off", "display auto-invert on", "display device-keys off",
+         "display menu-lock on", "display units temperature fahrenheit",
+         "display units flow gallons", "display chart 1 --source flow --interval 60",
+         "display chart 4", "flow coolant distilled", "flow connector over-7mm",
+         "flow calibration", "flow calibration -1,1,1,0,0,0,0,0,0,0",
+         "sensor offset internal -0.5", "sensor offset external",
+         "sensor water-quality 12.8 50", "sensor water-quality",
+         "alarm flow on --limit 45", "alarm flow --limit 45", "alarm flow",
+         "alarm internal off", "alarm external on --force", "alarm water-quality on",
+         "alarm startup-delay 10", "alarm buzzer off", "alarm blink-led on",
+         "alarm stop-signal on", "signal-output", "signal-output power-switch --force",
+         "system usb-current 600 --force", "system usb-current",
+         "system standby when-usb-disconnected on", "system standby on-usb-suspend off",
+         "system standby without-aquabus on", "system in-standby alarms-off on",
+         "system in-standby display-off off", "system in-standby leds-off on",
+         "system in-standby volume-stops off", "system aquabus-address 59",
+         "system aquabus-address", "volume reset", "volume reset -y",
+         "rgb create 2 pos 1-10 --effect static", "rgb set controller 8",
+         "rgb remove controller 3", "rgb remove channel 1", "rgb switch on",
+         "rgb brightness 45", "rgb effects", "name list", "name controller 8 X",
+         "name sensor water-quality X", "name virtual 8", "backup -o x.bin",
+         "restore x.bin --force"]
+malformed = ["display brightness dim", "display units flow gallon", "display chart 5",
+             "flow coolant water", "sensor offset middle 1", "alarm voltage on",
+             "signal-output off", "system aquabus-address 57", "rgb set controller 9",
+             "name sensor voltage X", "name controller 9 X", "fan set 1 mode fixed 40",
+             "display rotate yes", "system usb-current 600 --forced",
+             "display brightness high --force"]
+for form in forms + malformed:
+    try:
+        with contextlib.redirect_stderr(io.StringIO()):
+            PARSER.parse_args(shlex.split(form))
+        ok = True
+    except SystemExit:
+        ok = False
+    if ok != (form in forms):
+        bad.append("%r %s" % (form, "was refused" if form in forms else "was accepted"))
+check("command forms: %d parse, %d malformed ones refused" % (len(forms), len(malformed)),
+      bad)
+
+core.data_dir = real_data_dir
+shutil.rmtree(BACKUPS)
 
 print("\n%d/%d passed" % (checks - len(failures), checks))
 sys.exit(1 if failures else 0)

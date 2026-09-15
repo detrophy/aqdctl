@@ -459,8 +459,11 @@ def cmd_backup(dev, args):
 
 
 def cmd_restore(dev, args):
-    with open(args.file, "rb") as fh:
-        saved = bytearray(fh.read())
+    try:
+        with open(args.file, "rb") as fh:
+            saved = bytearray(fh.read())
+    except OSError as exc:
+        sys.exit("Cannot read %s: %s." % (args.file, exc.strerror or exc))
     rid = saved[0] if saved else None
     sizes = dev.kind.REPORT_SIZES
     if rid not in sizes or len(saved) != sizes[rid]:
@@ -494,6 +497,11 @@ def cmd_restore(dev, args):
                  % ("" if len(guarded) == 1 else "s",
                     ", ".join(str(c) for c in sorted(guarded))))
     before = dev.read(rid)
+    # The device's own safety checks apply to a restore as to any other write:
+    # a backup can hold a USB current or signal output mode just as a command can.
+    guard = getattr(dev.kind, "guard_write", None)
+    if guard is not None and rid == CTRL_REPORT_ID and before != saved:
+        guard(dev, before, saved, args)
     commit(dev, before, saved, args)
 
 
@@ -509,9 +517,12 @@ class HelpFormatter(argparse.RawDescriptionHelpFormatter):
         return argparse.HelpFormatter._fill_text(self, text, width, indent)
 
 
-def add_write_flags(p, guarded=False):
+def add_write_flags(p, guarded=False, force=None):
     """Flags common to every command that writes to the device.
-    Described together under "write flags" in the device's help."""
+    Described together under "write flags" in the device's help.
+
+    guarded: the command writes to a fan channel, which may be protected.
+    force: help text for a --force that goes past some other check."""
     p.add_argument("-n", "--dry-run", action="store_true",
                    help="show what would change and write nothing "
                         "(implies --verbose)")
@@ -521,11 +532,35 @@ def add_write_flags(p, guarded=False):
                    help="skip the confirmation prompt")
     p.add_argument("--backup", metavar="FILE",
                    help="where to put the pre-write backup")
-    if guarded:
+    if guarded or force:
         p.add_argument("--force", action="store_true",
-                       help="write even if the channel is protected")
+                       help=force or "write even if the channel is protected")
     p.set_defaults(guarded=guarded)
     return p
+
+
+DANGER_HEADER = "[### ATTENTION - DANGEROUS COMMAND ###]"
+
+
+def warn_danger(text, stream=None):
+    """Print a warning under the danger header, in red when the stream is a
+    terminal and NO_COLOR is not set (https://no-color.org)."""
+    stream = stream or sys.stdout
+    header = DANGER_HEADER
+    if getattr(stream, "isatty", lambda: False)() and not os.environ.get("NO_COLOR"):
+        header = "\033[31m%s\033[0m" % header
+    print(header, file=stream)
+    print(text, file=stream)
+
+
+def force_hint(dev, args):
+    """The command as typed, with --force added, for a refusal to quote."""
+    typed = getattr(args, "typed", None)
+    if typed is None:
+        return "  (the same command with --force)"
+    import shlex
+    return "  aqdctl --device %s %s --force" % (dev.serial,
+                                               " ".join(shlex.quote(w) for w in typed))
 
 
 def add_backup_restore(sub, kind):
@@ -544,6 +579,7 @@ def add_backup_restore(sub, kind):
                     "copy that device's settings onto this one.%s"
                     % (" It rewrites every channel, so it is also refused while "
                        "any channel is protected." if getattr(kind, "HAS_FANS", False)
-                       else "")), guarded=True)
+                       else " The safety checks of the commands apply to it too.")),
+        guarded=True, force="restore even though one of the checks above refuses it")
     p.add_argument("file", metavar="FILE")
     p.set_defaults(func=cmd_restore)

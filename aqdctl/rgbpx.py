@@ -604,15 +604,16 @@ def cmd_rgb_create(dev, args):
     first, count = parse_position(args.pos, layout.max_led(args.channel))
     last = first + count - 1
     buf = dev.read()
-    clash = overlapping(buf, layout, args.channel, first, last)
-    if clash:
-        _refuse_overlap(clash, args.channel, first, last)
+    # Full comes first: when no slot is free, no range would help.
     index = free_slot(buf, layout, args.channel)
     if index is None:
         used = [str(i) for i in layout.slots(args.channel)]
         sys.exit("Channel %d is full: its controllers %s are all in use. Remove one\n"
                  "with 'rgb remove controller N' first."
                  % (args.channel, ", ".join(used)))
+    clash = overlapping(buf, layout, args.channel, first, last)
+    if clash:
+        _refuse_overlap(clash, args.channel, first, last)
     base = layout.slot_base(index)
     after = bytearray(buf)
     after[base:base + RGB_STRIDE] = empty_slot(layout, index)

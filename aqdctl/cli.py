@@ -95,6 +95,7 @@ def main(argv=None):
 
     ap = found.kind.build_parser("aqdctl --device %s" % serial)
     args = ap.parse_args(rest)
+    args.typed = rest       # for refusals that quote the command back with --force
     if not getattr(args, "func", None):
         # A group named with no verb: show THAT group's help, not the top level.
         # Each intermediate parser stashes itself in _helper, and the deepest one
