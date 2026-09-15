@@ -45,8 +45,8 @@ Ids and sizes come from the HID report descriptor
 (`/sys/class/hidraw/hidrawN/device/report_descriptor`).
 
 **Checksum** (0x03 and 0x08): CRC-16/USB over bytes 1 to size−3, stored
-big-endian in the last two bytes. This is the Octo's scheme; octoctl's
-`crc16_usb` and `reseal` apply unchanged. Report 0x0c has no checksum.
+big-endian in the last two bytes. This is the Octo's scheme; aqdctl's
+`core.crc16_usb` and `core.reseal` apply unchanged. Report 0x0c has no checksum.
 
 `02-idle-no-change` (no change made) left 0x03 and 0x08 byte-identical, so neither report
 contains values that change on their own.
@@ -143,7 +143,7 @@ against live values: predicted 85.48 %, device 85.49 %.
 | 0x059  | u8       | brightness, 0–255                                        | `04-rgb-brightness-45` |
 | 0x05a  | u8       | 0, unknown                                               | —               |
 | 0x05b  | u8       | on/off: 0x00 on, 0x02 off                                | `03-rgb-switch-on`        |
-| 0x05c  | 8 × 70 B | controllers, in the Octo's slot format                   | octoctl decoder |
+| 0x05c  | 8 × 70 B | controllers, in the Octo's slot format                   | aqdctl's decoder |
 
 - 0x059: Aquasuite's slider moves one byte per step on both devices (High
   Flow Next 19 → 20 → 21 → 22; Octo 255 → 254 → 253). One shown percentage
@@ -379,7 +379,7 @@ Taken from the captures in `../usb-captures/`.
 - **Command 0x64** set volume, impulse count and time since reset to 0 at
   once. The next report 0x01, 0.26 s later, read 0 l, 10 impulses, 1 s. It
   cannot be undone.
-- The frame for command 0x02 is byte for byte the constant octoctl takes from
+- The frame for command 0x02 is byte for byte the constant aqdctl takes from
   the kernel driver.
 - The vendor interface's bulk endpoints (0x81 IN, 0x02 OUT) carry nothing in
   any capture. Settings never go through them.
@@ -421,7 +421,7 @@ Taken from the captures in `../usb-captures/`.
   - Tools that show the value as-is report about 4.29 kW.
 
 
-## Differences from the Octo that matter for octoctl
+## Differences from the Octo that matter for aqdctl
 
 - No fan channels.
 - RGB: 8 controllers at 0x05c (the Octo has 12 at 0x307).

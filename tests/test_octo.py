@@ -1,26 +1,42 @@
 #!/usr/bin/env python3
-"""Offline smoke test: run every command against captured reports.
+"""Offline test of the Octo support: run every command against captured reports.
 
 Catches undefined names, bad offsets and checksum mistakes without touching
 hardware. Reads the Octo captures in octo/.
 """
-import argparse, importlib.util, io, os, sys, tempfile, traceback, contextlib
-
-spec = importlib.util.spec_from_file_location("octoctl", os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "octoctl.py"))
-m = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(m)
+import argparse, io, os, sys, tempfile, traceback, contextlib, types
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-FIX = os.path.join(HERE, "octo")
+ROOT = os.path.dirname(HERE)
+sys.path.insert(0, ROOT)
+from aqdctl import cli, core, discovery, names, octo, rgbpx
+
+# The checks below address everything as m.NAME, as they did when the tool was
+# one module. This namespace keeps them readable: every module's names, with the
+# helpers that now take a layout or a serial bound to the fake Octo.
+SERIAL = "12345-67890"          # the fake device's serial
+m = types.SimpleNamespace()
+for module in (core, rgbpx, names, octo):
+    m.__dict__.update({k: v for k, v in vars(module).items() if not k.startswith("__")})
+m.read_entry = lambda buf, index, entry=0: rgbpx.read_entry(buf, octo.RGB, index, entry)
+m.decode_labels = lambda buf: names.decode(buf, octo.NAME_GROUPS)
+m.LABEL_GROUPS = {g.cli: (g.base, g.count) for g in octo.NAME_GROUPS}
+m.protected_channels = lambda: core.protected_channels(SERIAL)
+m.guard_channel = lambda channel, force: core.guard_channel(SERIAL, channel, force)
+
+FIX = os.path.join(ROOT, "octo")
 BLOBS = {m.CTRL_REPORT_ID: open(os.path.join(FIX, "03-rgb-controllers-8-to-10-effects.bin"), "rb").read(),
          m.LABEL_REPORT_ID: open(os.path.join(FIX, "03-rgb-controllers-8-to-10-effects-08.bin"), "rb").read()}
 
 
 class FakeOcto:
     """Serves captured reports; records writes instead of sending them."""
-    def __init__(self): self.written = []
-    def read(self, report_id=m.CTRL_REPORT_ID): return bytearray(BLOBS[report_id])
+    kind, serial = octo, SERIAL
+    def __init__(self, ctrl=None):
+        self.written, self.blobs = [], dict(BLOBS)
+        if ctrl is not None:
+            self.blobs[m.CTRL_REPORT_ID] = bytes(ctrl)
+    def read(self, report_id=m.CTRL_REPORT_ID): return bytearray(self.blobs[report_id])
     def write(self, buf):
         stored, computed = m.report_crc(buf)
         assert stored == computed, "wrote a report with a stale checksum"
@@ -29,7 +45,7 @@ class FakeOcto:
 
 def _quiet(fn, args):
     with contextlib.redirect_stdout(io.StringIO()):
-        return fn(None, args)
+        return fn(FakeOcto(), args)
 
 
 def ns(**kw):
@@ -121,54 +137,46 @@ CASES = [
     ("rgb effect one",m.cmd_rgb_effects,ns(effect="wave"), None),
     ("rgb effect bad",m.cmd_rgb_effects,ns(effect="nope"), "exit"),
 
-    # channel + position addressing against the real ranges in the fixture:
-    # ch1 1-28 static, ch2 1-15 colour change, 16-30 scanner, 31-45 rain,
-    # 46-60 static, 61-79 wave.
-    ("rgb edit exact",m.cmd_rgb_set,    ns(channel=2, pos="61-79",
-                                           param=["speed=30"]), None),
-    ("rgb new slot",  m.cmd_rgb_set,    ns(channel=1, pos="40-54",
+    # The fixture is capture 03. Controller 1 is channel 1, LEDs 1-28, static.
+    # On channel 2: 7 = 61-79 wave, 8 = 1-15 colour change, 9 = 16-30 scanner,
+    # 10 = 31-45 rain, 11 = 46-60 static. Slots 2-6 and 12 are free.
+    ("rgb edit",      m.cmd_rgb_set,    ns(controller=7, param=["speed=30"]), None),
+    ("rgb create",    m.cmd_rgb_create, ns(channel=1, pos="40-54",
                                            effect="static", colour="FF0000"), None),
-    ("rgb new no fx", m.cmd_rgb_set,    ns(channel=1, pos="40-54"), "exit"),
-    ("rgb overlap",   m.cmd_rgb_set,    ns(channel=2, pos="10-20",
+    ("rgb create no fx", m.cmd_rgb_create, ns(channel=1, pos="40-54"), "exit"),
+    ("rgb overlap",   m.cmd_rgb_create, ns(channel=2, pos="10-20",
                                            effect="static"), "exit"),
-    ("rgb colour",    m.cmd_rgb_set,    ns(channel=1, pos="1-28",
-                                           colour="DD2FA7"), None),
-    ("rgb bg+list",   m.cmd_rgb_set,    ns(channel=2, pos="61-79",
-                                           background="0A0A0A",
+    ("rgb colour",    m.cmd_rgb_set,    ns(controller=1, colour="DD2FA7"), None),
+    ("rgb bg+list",   m.cmd_rgb_set,    ns(controller=7, background="0A0A0A",
                                            colour="FF0000,00FF00,0000FF"), None),
-    ("rgb too many",  m.cmd_rgb_set,    ns(channel=2, pos="16-30",
+    ("rgb too many",  m.cmd_rgb_set,    ns(controller=9,
                                            colour="FF0000,00FF00,0000FF"), "exit"),
-    ("rgb no bg",     m.cmd_rgb_set,    ns(channel=2, pos="1-15",
-                                           background="0A0A0A"), "exit"),
-    ("rgb count kw",  m.cmd_rgb_set,    ns(channel=2, pos="61-79",
-                                           param=["count=3"]), "exit"),
-    ("rgb bad param", m.cmd_rgb_set,    ns(channel=2, pos="61-79",
-                                           param=["nope=3"]), "exit"),
-    ("rgb effect set",m.cmd_rgb_set,    ns(channel=2, pos="46-60",
-                                           effect="wave"), None),
-    ("rgb unimpl",    m.cmd_rgb_set,    ns(channel=2, pos="46-60",
-                                           effect="0x06"), None),
-    ("rgb flag on",   m.cmd_rgb_set,    ns(channel=2, pos="16-30",
-                                           flag=["reverse"]), None),
-    ("rgb flag off",  m.cmd_rgb_set,    ns(channel=2, pos="16-30",
-                                           no_flag=["circular"]), None),
-    ("rgb bad flag",  m.cmd_rgb_set,    ns(channel=2, pos="16-30",
-                                           flag=["nonsense"]), "exit"),
-    ("rgb fx+flag",   m.cmd_rgb_set,    ns(channel=2, pos="31-45",
-                                           effect="rain", flag=["snow"]), None),
-    ("rgb sensor",    m.cmd_rgb_set,    ns(channel=2, pos="61-79", sensor="1"), None),
-    ("rgb no sensor", m.cmd_rgb_set,    ns(channel=2, pos="61-79", sensor="none"), None),
-    ("rgb filters",   m.cmd_rgb_set,    ns(channel=2, pos="61-79",
-                                           filter_rise=11, filter_fall=16), None),
-    ("rgb srcflag",   m.cmd_rgb_set,    ns(channel=2, pos="61-79",
-                                           flag=["source_speed"]), None),
-    ("rgb bad pos",   m.cmd_rgb_set,    ns(channel=2, pos="30-10",
+    ("rgb no bg",     m.cmd_rgb_set,    ns(controller=8, background="0A0A0A"), "exit"),
+    ("rgb count kw",  m.cmd_rgb_set,    ns(controller=7, param=["count=3"]), "exit"),
+    ("rgb bad param", m.cmd_rgb_set,    ns(controller=7, param=["nope=3"]), "exit"),
+    ("rgb effect set",m.cmd_rgb_set,    ns(controller=11, effect="wave"), None),
+    ("rgb unimpl",    m.cmd_rgb_set,    ns(controller=11, effect="0x06"), None),
+    ("rgb flag on",   m.cmd_rgb_set,    ns(controller=9, flag=["reverse"]), None),
+    ("rgb flag off",  m.cmd_rgb_set,    ns(controller=9, no_flag=["circular"]), None),
+    ("rgb bad flag",  m.cmd_rgb_set,    ns(controller=9, flag=["nonsense"]), "exit"),
+    ("rgb fx+flag",   m.cmd_rgb_set,    ns(controller=10, effect="rain",
+                                           flag=["snow"]), None),
+    ("rgb sensor",    m.cmd_rgb_set,    ns(controller=7, sensor="1"), None),
+    ("rgb no sensor", m.cmd_rgb_set,    ns(controller=7, sensor="none"), None),
+    ("rgb filters",   m.cmd_rgb_set,    ns(controller=7, filter_rise=11,
+                                           filter_fall=16), None),
+    ("rgb srcflag",   m.cmd_rgb_set,    ns(controller=7, flag=["source_speed"]), None),
+    ("rgb unused",    m.cmd_rgb_set,    ns(controller=3, colour="FF0000"), "exit"),
+    ("rgb resize",    m.cmd_rgb_set,    ns(controller=7, pos="61-85"), None),
+    ("rgb resize clash", m.cmd_rgb_set, ns(controller=7, pos="1-20"), "exit"),
+    ("rgb bad pos",   m.cmd_rgb_create, ns(channel=2, pos="30-10",
                                            effect="static"), "exit"),
-    ("rgb pos overrun",m.cmd_rgb_set,   ns(channel=2, pos="1-200",
+    ("rgb pos overrun",m.cmd_rgb_create,ns(channel=2, pos="80-200",
                                            effect="static"), "exit"),
-    ("rgb remove one",m.cmd_rgb_remove, ns(channel=2, pos="61-79"), None),
-    ("rgb remove ch", m.cmd_rgb_remove, ns(channel=2, pos=None), None),
-    ("rgb remove none",m.cmd_rgb_remove,ns(channel=1, pos="70-80"), "exit"),
+    ("rgb remove one",m.cmd_rgb_remove, ns(what="controller", number=7), None),
+    ("rgb remove ch", m.cmd_rgb_remove, ns(what="channel", number=2), None),
+    ("rgb remove none",m.cmd_rgb_remove,ns(what="controller", number=3), "exit"),
+    ("rgb remove bad ch",m.cmd_rgb_remove,ns(what="channel", number=3), "exit"),
 ]
 
 failures = []
@@ -198,7 +206,7 @@ for name, fn, args, expect in CASES:
 with tempfile.TemporaryDirectory() as tmp:
     try:
         with contextlib.redirect_stdout(io.StringIO()):
-            m.cmd_backup(FakeOcto(), ns(output=os.path.join(tmp, "d.bin")))
+            m.cmd_backup(FakeOcto(), ns(output=os.path.join(tmp, "octo-%s.bin" % SERIAL)))
         produced = sorted(os.listdir(tmp))
         assert len(produced) == 2, "backup should write both reports, got %s" % produced
         print("  ok    backup -> %s" % produced)
@@ -826,8 +834,8 @@ else:
 # test drives it through a throwaway config directory instead of the real one.
 bad = []
 with tempfile.TemporaryDirectory() as tmp:
-    real_config_path = m.config_path
-    m.config_path = lambda: os.path.join(tmp, "config.json")
+    real_config_path = core.config_path
+    core.config_path = lambda: os.path.join(tmp, "config.json")
     try:
         if m.protected_channels():
             bad.append("a fresh config should protect nothing")
@@ -855,7 +863,7 @@ with tempfile.TemporaryDirectory() as tmp:
     except Exception:
         bad.append(traceback.format_exc())
     finally:
-        m.config_path = real_config_path
+        core.config_path = real_config_path
 if bad:
     failures.append(("channel protection", "; ".join(bad)))
     print("  FAIL  channel protection: %s" % "; ".join(bad))
@@ -896,41 +904,42 @@ else:
 # home, so a symlink left in place of one must not be followed.
 bad = []
 with tempfile.TemporaryDirectory() as tmp:
-    real_config_path = m.config_path
+    real_config_path = core.config_path
     try:
         victim = os.path.join(tmp, "victim")
         with open(victim, "w") as fh:
             fh.write("untouched")
         link = os.path.join(tmp, "config.json")
         os.symlink(victim, link)
-        m.config_path = lambda: link
+        core.config_path = lambda: link
         try:
             m.save_config({"protected": [1]})
             bad.append("save_config wrote through a symlink")
         except SystemExit:
             pass
         try:
-            m.backup(bytearray(BLOBS[m.CTRL_REPORT_ID]), link)
+            core.backup(bytearray(BLOBS[m.CTRL_REPORT_ID]), FakeOcto(), link)
             bad.append("backup wrote through a symlink")
         except SystemExit:
             pass
         if open(victim).read() != "untouched":
             bad.append("the symlink target was modified")
         plain = os.path.join(tmp, "plain.bin")
-        if len(open(m.backup(bytearray(BLOBS[m.CTRL_REPORT_ID]), plain), "rb").read()) \
+        if len(open(core.backup(bytearray(BLOBS[m.CTRL_REPORT_ID]), FakeOcto(), plain),
+                    "rb").read()) \
                 != m.CTRL_REPORT_SIZE:
             bad.append("a backup to a real path did not round-trip")
     except Exception:
         bad.append(traceback.format_exc())
     finally:
-        m.config_path = real_config_path
+        core.config_path = real_config_path
 if bad:
     failures.append(("symlink safety", "; ".join(bad)))
     print("  FAIL  symlink safety: %s" % "; ".join(bad))
 else:
     print("  ok    config and backup refuse to write through a symlink")
 
-# Octo.write is the one path the fake device replaces everywhere else, so it
+# Device.write is the one path the fake device replaces everywhere else, so it
 # gets its own check against a recording stand-in for the hidapi handle: the
 # settings report goes out as a feature report followed by the command frame as
 # an output report, a name report is followed by nothing, and a failed
@@ -945,22 +954,22 @@ class RecordingHid:
         self.calls.append(("output", bytes(data)))
         return -1 if self.fail_output else len(data)
 bad = []
-saved_delay, m.CTRL_REPORT_DELAY = m.CTRL_REPORT_DELAY, 0
+saved_delay, core.CTRL_REPORT_DELAY = core.CTRL_REPORT_DELAY, 0
 try:
     ctrl = bytearray(BLOBS[m.CTRL_REPORT_ID])
-    names = bytearray(BLOBS[m.LABEL_REPORT_ID])
-    octo = m.Octo("recording")
-    octo.dev = RecordingHid()
-    octo.write(ctrl)
-    if octo.dev.calls != [("feature", bytes(ctrl)), ("output", m.SECONDARY_CTRL_REPORT)]:
-        bad.append("settings write sent %s" % [(k, len(d)) for k, d in octo.dev.calls])
-    octo.dev = RecordingHid()
-    octo.write(names)
-    if octo.dev.calls != [("feature", bytes(names))]:
-        bad.append("name write sent %s" % [(k, len(d)) for k, d in octo.dev.calls])
-    octo.dev = RecordingHid(fail_output=True)
+    labels = bytearray(BLOBS[m.LABEL_REPORT_ID])
+    dev = core.Device(octo, "recording", SERIAL)
+    dev.dev = RecordingHid()
+    dev.write(ctrl)
+    if dev.dev.calls != [("feature", bytes(ctrl)), ("output", m.SECONDARY_CTRL_REPORT)]:
+        bad.append("settings write sent %s" % [(k, len(d)) for k, d in dev.dev.calls])
+    dev.dev = RecordingHid()
+    dev.write(labels)
+    if dev.dev.calls != [("feature", bytes(labels))]:
+        bad.append("name write sent %s" % [(k, len(d)) for k, d in dev.dev.calls])
+    dev.dev = RecordingHid(fail_output=True)
     try:
-        octo.write(ctrl)
+        dev.write(ctrl)
         bad.append("a failed report 0x02 passed silently")
     except SystemExit:
         pass
@@ -970,13 +979,222 @@ try:
 except Exception:
     bad.append(traceback.format_exc())
 finally:
-    m.CTRL_REPORT_DELAY = saved_delay
+    core.CTRL_REPORT_DELAY = saved_delay
 if bad:
     failures.append(("write path", "; ".join(bad)))
     print("  FAIL  write path: %s" % "; ".join(bad))
 else:
     print("  ok    write path: feature 0x03 then output 0x02; names alone; failures stop")
 
-total = len(CASES) + 33
+# RGB controllers keep to their channel's slots: 1-6 on channel 1, 7-12 on
+# channel 2. Capture 03 has slot 1 in use on channel 1, and slots 7-11 (LEDs
+# 1-79) on channel 2.
+def _write(fn, ctrl=None, **kw):
+    """Run a handler for real against the fake device; return what it wrote."""
+    fake = FakeOcto(ctrl)
+    with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
+        fn(fake, ns(dry_run=False, backup=os.path.join(tmp, "b.bin"), **kw))
+    return fake.written[-1] if fake.written else None
+
+def _refusal(fn, ctrl=None, **kw):
+    """The message a handler refuses with, or None if it ran."""
+    try:
+        _write(fn, ctrl, **kw)
+    except SystemExit as e:
+        return str(e)
+    return None
+
+def _slots_changed(before, after):
+    first = m.RGB_BASE
+    return sorted({(i - first) // m.RGB_STRIDE + 1
+                   for i in range(first, first + 12 * m.RGB_STRIDE) if before[i] != after[i]})
+
+bad = []
+try:
+    CAP = BLOBS[m.CTRL_REPORT_ID]
+    w = _write(m.cmd_rgb_create, channel=1, pos="29-40", effect="static", colour="FF0000")
+    if _slots_changed(CAP, w) != [2]:
+        bad.append("channel 1 create went to %s, want slot 2" % _slots_changed(CAP, w))
+    w12 = _write(m.cmd_rgb_create, channel=2, pos="80-85", effect="static", colour="FF0000")
+    if _slots_changed(CAP, w12) != [12]:
+        bad.append("channel 2 create went to %s, want slot 12" % _slots_changed(CAP, w12))
+    msg = _refusal(m.cmd_rgb_create, ctrl=w12, channel=2, pos="86-90", effect="static")
+    if not msg or "full" not in msg or "7, 8, 9, 10, 11, 12" not in msg:
+        bad.append("a seventh controller on channel 2 was not refused as full: %r" % msg)
+    msg = _refusal(m.cmd_rgb_create, channel=2, pos="10-20", effect="static")
+    if not msg or "controller 8" not in msg:
+        bad.append("an overlapping create did not name controller 8: %r" % msg)
+    w = _write(m.cmd_rgb_set, controller=7, pos="61-85")
+    b7 = m.RGB_BASE + m.RGB_STRIDE * 6
+    moved = [i for i in range(len(CAP) - 2) if CAP[i] != w[i]]
+    if moved != [b7 + m.RGB_COUNT_OFF] or w[b7 + m.RGB_COUNT_OFF] != 25:
+        bad.append("resizing controller 7 changed %s, want only its LED count (25)"
+                   % ["%#05x" % i for i in moved])
+    msg = _refusal(m.cmd_rgb_set, controller=7, pos="1-20")
+    if not msg or "controller 8" not in msg:
+        bad.append("resizing onto controller 8's LEDs was not refused: %r" % msg)
+    w = _write(m.cmd_rgb_remove, what="controller", number=9)
+    b9 = m.RGB_BASE + m.RGB_STRIDE * 8
+    if bytes(w[b9:b9 + m.RGB_STRIDE]) != rgbpx.empty_slot(octo.RGB, 9) or w[b9] != 1:
+        bad.append("removing controller 9 did not leave an empty slot on channel 2")
+    if _slots_changed(CAP, w) != [9]:
+        bad.append("removing controller 9 touched slots %s" % _slots_changed(CAP, w))
+    w = _write(m.cmd_rgb_remove, what="channel", number=2)
+    if _slots_changed(CAP, w) != [7, 8, 9, 10, 11]:
+        bad.append("clearing channel 2 touched slots %s" % _slots_changed(CAP, w))
+    if (rgbpx.empty_slot(octo.RGB, 2)[0], rgbpx.empty_slot(octo.RGB, 12)[0]) != (0, 1):
+        bad.append("empty slots do not keep their channel's port byte")
+except Exception:
+    bad.append(traceback.format_exc())
+if bad:
+    failures.append(("rgb controllers", "; ".join(bad)))
+    print("  FAIL  rgb controllers: %s" % "; ".join(bad))
+else:
+    print("  ok    rgb controllers: own-channel slots, full/overlap refusals, resize, removal")
+
+# restore only accepts a backup of this device, unless --force says otherwise
+bad = []
+with tempfile.TemporaryDirectory() as tmp:
+    def _restore(path, force=False):
+        """None if it restored, else the refusal - or the crash, which fails."""
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                m.cmd_restore(FakeOcto(), ns(file=path, force=force))
+            return None
+        except SystemExit as e:
+            return str(e) or "exit"
+        except Exception:
+            bad.append("restore crashed: %s" % traceback.format_exc().splitlines()[-1])
+            return "crashed"
+    ours = os.path.join(tmp, "octo-%s-03-20260915.bin" % SERIAL)
+    theirs = os.path.join(tmp, "octo-99999-88888-03-20260915.bin")
+    anonymous = os.path.join(tmp, "settings.bin")
+    other_kind = os.path.join(tmp, "highflow-%s.bin" % SERIAL)
+    for path in (ours, theirs, anonymous):
+        open(path, "wb").write(BLOBS[m.CTRL_REPORT_ID])
+    open(other_kind, "wb").write(open(os.path.join(ROOT, "highflow", "01-baseline.bin"), "rb").read())
+    if _restore(ours):
+        bad.append("a backup of this device was refused: %s" % _restore(ours))
+    if not _restore(theirs) or "99999-88888" not in _restore(theirs):
+        bad.append("another device's backup was not refused")
+    if not _restore(anonymous) or "does not say which device" not in _restore(anonymous):
+        bad.append("a backup without a serial was not refused")
+    if _restore(theirs, force=True):
+        bad.append("--force did not let another device's backup through")
+    if not _restore(other_kind, force=True) or "not a report of the Octo" \
+            not in _restore(other_kind, force=True):
+        bad.append("a high flow NEXT report was accepted by the Octo, even with --force")
+if bad:
+    failures.append(("restore origin", "; ".join(bad)))
+    print("  FAIL  restore origin: %s" % "; ".join(bad))
+else:
+    print("  ok    restore: own backups pass; other or unknown origin needs --force; wrong type never")
+
+# protection belongs to one device's serial, never to a channel number alone
+bad = []
+with tempfile.TemporaryDirectory() as tmp:
+    real_config_path = core.config_path
+    core.config_path = lambda: os.path.join(tmp, "config.json")
+    try:
+        core.set_protected("11111-11111", {1})
+        if core.protected_channels("22222-22222"):
+            bad.append("protecting channel 1 on one Octo protected it on another")
+        try:
+            core.guard_channel("22222-22222", 1, False)
+        except SystemExit:
+            bad.append("the other Octo's channel 1 was refused as protected")
+        try:
+            core.guard_channel("11111-11111", 1, False)
+            bad.append("the protected device's channel 1 was not refused")
+        except SystemExit:
+            pass
+    except Exception:
+        bad.append(traceback.format_exc())
+    finally:
+        core.config_path = real_config_path
+if bad:
+    failures.append(("protection per device", "; ".join(bad)))
+    print("  FAIL  protection per device: %s" % "; ".join(bad))
+else:
+    print("  ok    protection is kept per serial")
+
+# --device picks one device by serial, must come first, and is required
+bad = []
+two = [discovery.Found(octo, "11111-11111", b"/nonexistent/a"),
+       discovery.Found(octo, "22222-22222", b"/nonexistent/b")]
+real_attached = discovery.attached
+discovery.attached = lambda: two
+with tempfile.TemporaryDirectory() as tmp:
+    real_config_path = core.config_path
+    core.config_path = lambda: os.path.join(tmp, "config.json")
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli.main(["--device", "22222-22222", "fan", "set", "1", "protect", "on"])
+        if (core.protected_channels("22222-22222"), core.protected_channels("11111-11111")) \
+                != ({1}, set()):
+            bad.append("--device 22222-22222 did not act on that device alone")
+        # each must be refused for its own reason, not for some later failure
+        for argv, why, reason in (
+                (["--device", "33333-33333", "info"], "an unknown serial",
+                 "No attached device has the serial"),
+                (["fan", "set", "1", "mode", "fixed", "40"], "no --device",
+                 "A device is required"),
+                (["info", "fan", "--device", "11111-11111"], "--device not first",
+                 "--device must come first"),
+                (["--device"], "--device without a serial", "--device needs a serial")):
+            err = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                    cli.main(argv)
+                bad.append("%s was accepted" % why)
+            except SystemExit as e:
+                said = "%s %s" % (e.code if isinstance(e.code, str) else "", err.getvalue())
+                if reason not in said:
+                    bad.append("%s was refused, but not because of it: %r" % (why, said[:80]))
+    except Exception:
+        bad.append(traceback.format_exc())
+    finally:
+        core.config_path = real_config_path
+        discovery.attached = real_attached
+if bad:
+    failures.append(("device selection", "; ".join(bad)))
+    print("  FAIL  device selection: %s" % "; ".join(bad))
+else:
+    print("  ok    --device selects by serial, first and required; others refused")
+
+# every command form in the plan parses; the malformed ones are refused
+bad = []
+ap = octo.build_parser("aqdctl --device %s" % SERIAL)
+forms = ["info", "info rgb", "fan set 3 mode fixed 40", "fan set 3 mode target",
+         "fan set 3 mode target 36 --sensor 2", "fan set 7 mode curve --linear 30 45 20 100",
+         "fan set 6 mode follow 3", "fan set 3 limits 25 35", "fan set 3 fallback 35",
+         "fan set 3 boost on", "fan set 3 hold-min off", "fan set 3 max-rpm",
+         "fan set 3 pid --preset fast --d 600", "fan set 1 protect on",
+         "rgb create 2 pos 1-15 --effect static --colour FF0000",
+         "rgb set controller 7", "rgb set controller 7 pos 61-85 --param speed=30",
+         "rgb remove controller 7", "rgb remove channel 2", "rgb switch on",
+         "rgb brightness 45", "rgb effects", "rgb effects wave", "name list",
+         "name fan 3 Front", "name controller 7", "name virtual 16 X",
+         "sensor offset 1", "sensor offset 1 -0.6", "sensor flow", "backup -o x.bin",
+         "restore x.bin --force"]
+malformed = ["rgb create 2 pos 1-15", "rgb set 7", "rgb set controller 13",
+             "rgb remove 2", "rgb set controller 7 61-85", "fan set 9 mode fixed 40",
+             "name controller 13"]
+for form in forms + malformed:
+    try:
+        with contextlib.redirect_stderr(io.StringIO()):
+            ap.parse_args(form.split())
+        ok = True
+    except SystemExit:
+        ok = False
+    if ok != (form in forms):
+        bad.append("%r %s" % (form, "was refused" if form in forms else "was accepted"))
+if bad:
+    failures.append(("command forms", "; ".join(bad)))
+    print("  FAIL  command forms: %s" % "; ".join(bad))
+else:
+    print("  ok    command forms: %d parse, %d malformed ones refused" % (len(forms), len(malformed)))
+
+total = len(CASES) + 39
 print("\n%d/%d passed" % (total - len(failures), total))
 sys.exit(1 if failures else 0)

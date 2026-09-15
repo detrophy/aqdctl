@@ -11,7 +11,7 @@ different sizes, plus one the Octo does not have:
     0x08 feature   773  on the Octo this is the name table
     0x0c feature  1025  no Octo counterpart
 
-The first question is whether octoctl's framing transfers: CRC-16/USB over
+The first question is whether the Octo's framing transfers: CRC-16/USB over
 everything after the report id, stored big-endian in the last two bytes. If it
 holds, the codec, pacing and write path carry over and only the layout is new.
 

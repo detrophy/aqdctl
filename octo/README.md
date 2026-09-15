@@ -2,7 +2,8 @@
 
 Feature report dumps of an Aquacomputer Octo (USB `0c70:f011`), each taken
 after changing one thing in Aquasuite. They are the evidence behind the field
-map in `../octoctl.py`, and `../test_octoctl.py` checks the code against them.
+map in `../aqdctl/octo.py`, and `../tests/test_octo.py` checks the code against
+them.
 
 - `NN-description.bin`: report 0x03, the settings, 1631 bytes.
 - `NN-description-08.bin`: report 0x08, the names, 1013 bytes, taken at the
