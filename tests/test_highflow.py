@@ -1060,9 +1060,19 @@ with contextlib.redirect_stdout(out):
                        highflow.RGB, 1, "strip", highflow.source_label)
 text = out.getvalue()
 for want in ("stops=1", "stop1_position=775", "rotation_speed=", "reverse_direction",
-             "unknown bits 0x07", "colour 1:", "not part of this effect", "(unused)"):
+             "colour 1:", "background default, unused", "(unused)"):
     if want not in text:
         bad.append("'info rgb' on a gradient lacks %r:\n%s" % (want, text))
+if "unknown bits" in text:
+    bad.append("the gradient's constant flag bits are still reported as unknown:\n" + text)
+# one of them missing would mean this firmware writes the effect differently
+probe = bytearray(usb_writes(GRADIENT % "13-highflow-rgb-gradient-reverse-direction-on-then-off")[1])
+probe[highflow.RGB.slot_base(1) + rgbpx.RGB_FLAGS_OFFSET] &= ~0x04
+out = io.StringIO()
+with contextlib.redirect_stdout(out):
+    rgbpx.describe_rgb(probe, highflow.RGB, 1, "strip", highflow.source_label)
+if "expected bits 0x04 not set" not in out.getvalue():
+    bad.append("a missing constant bit is not reported:\n" + out.getvalue())
 check("colour gradient: the two captured flags and the stop count are named", bad)
 
 # ------------------ the gradient's stops and colours, from USB capture 16

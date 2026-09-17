@@ -138,6 +138,11 @@ RGB_FLAG_NAMES[0x0B] = {"reverse": 0x02, "random_colour": 0x08}
 # 0x01, 0x02 and 0x04 are set in every gradient seen so far, on both devices,
 # and no capture has moved them.
 RGB_FLAG_NAMES[0x21] = {"reverse_direction": 0x08, "reverse_rotation": 0x10}
+# Bits an effect always carries, whatever its settings. The gradient panel holds
+# exactly two toggles, the two above, and 0x07 is set in all 98 gradients
+# captured on both devices - including a fresh one on the Octo - so these three
+# bits are a constant the software writes, not options left switched on.
+RGB_FLAGS_CONSTANT = {0x21: 0x07}
 # Which palette entries an effect uses, and what they mean.
 RGB_PALETTE_ROLES = {
     0x01: ["colour"],
@@ -182,8 +187,10 @@ RGB_PALETTE_SPEC = {
 # gradient holds red, green and blue in entries 2-4), but which entry belongs to
 # which stop has not been captured, so it is listed apart rather than guessed.
 # Where an effect's colours start in the palette. Colour gradient keeps entries
-# 0 and 1 out of it: they read #000000 and #050505 in every gradient captured on
-# either device, and no capture has moved them.
+# 0 and 1 out of it: they hold #000000 and #050505 in every gradient captured on
+# either device, which the owner identifies as the background colours the
+# official software writes by default. Its gradient panel has no background
+# control, so the effect does not use them.
 RGB_PALETTE_START = {0x21: 2}
 # Effects whose unused palette entries repeat the last colour instead of being
 # cleared, as the official software writes them.
@@ -313,7 +320,7 @@ def palette_roles(mode):
     validation in 'rgb create' and 'rgb set'."""
     start = RGB_PALETTE_START.get(mode, 0)
     has_bg, _lo, hi = RGB_PALETTE_SPEC.get(mode, (False, 0, 0))
-    roles = ["not part of this effect"] * start + (["background"] if has_bg else [])
+    roles = ["background default, unused"] * start + (["background"] if has_bg else [])
     # A single-colour effect just has "colour"; numbering one thing is noise.
     if hi == 1:
         return roles + ["colour"]
@@ -433,10 +440,16 @@ def describe_rgb(buf, layout, index, name, source_label):
 
     flags = buf[base + RGB_FLAGS_OFFSET]
     known = RGB_FLAG_NAMES.get(mode, {})
+    constant = RGB_FLAGS_CONSTANT.get(mode, 0)
     on = [n for n, bit in sorted(known.items()) if flags & bit]
-    leftover = flags & ~sum(known.values()) if known else flags
-    if on or leftover:
+    leftover = flags & ~(sum(known.values()) | constant) if known else flags & ~constant
+    missing = constant & ~flags
+    if on or leftover or missing:
         extra = "   unknown bits %#04x" % leftover if leftover else ""
+        # The constant bits are not worth a word until one of them is absent,
+        # which would mean this firmware writes the effect differently.
+        if missing:
+            extra += "   expected bits %#04x not set" % missing
         print("      flags : %s%s" % (", ".join(on) or "none", extra))
 
     src = core.be16(buf, base + RGB_SOURCE)
