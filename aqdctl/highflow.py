@@ -1253,7 +1253,7 @@ def build_parser(prefix):
                     "while the signal output is in a power mode.")
     alarm.set_defaults(_helper=alarm)
     asub = alarm.add_subparsers(dest="alarmcmd")
-    metavars = {"l/h": "L/H", "C": "CELSIUS", "%": "PERCENT"}
+    metavars = {"l/h": "LITRES_PER_HOUR", "C": "CELSIUS", "%": "PERCENT"}
     examples = {"flow": 60, "internal": 45, "external": 45, "water-quality": 30}
     for a in ALARMS:
         p = writer(asub.add_parser(

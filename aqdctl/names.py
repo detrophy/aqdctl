@@ -101,7 +101,7 @@ def register(sub, kind, prefix):
     name = sub.add_parser(
         "name", formatter_class=core.HelpFormatter,
         help="names stored on the device",
-        description="The %s stores names that the official software shows. "
+        description="The %s stores names that Aquasuite shows. "
                     "Groups: %s." % (kind.TITLE, ", ".join(
                         "%s (%s)" % (g.cli, g.what) for g in kind.NAME_GROUPS)))
     name.set_defaults(_helper=name)

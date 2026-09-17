@@ -445,7 +445,7 @@ def cmd_mode_curve(dev, args):
 def cmd_pid(dev, args):
     """Read or set a channel's controller tuning.
 
-    The device stores no preset identifier - the official software just writes
+    The device stores no preset identifier - Aquasuite just writes
     these five numbers - so --preset is a named row of values, and any explicit
     flag given alongside it wins."""
     before = dev.read()
@@ -603,7 +603,7 @@ def cmd_offset(dev, args):
     if args.celsius is None:
         print("sensor %d offset: %+.2f C" % (args.sensor, current))
         return
-    # the official software and the kernel driver both cap this at +/-15 K
+    # Aquasuite and the kernel driver both cap this at +/-15 K
     if not -15.0 <= args.celsius <= 15.0:
         sys.exit("Offset must be within +/-15.00 C.")
     after = bytearray(before)
@@ -858,7 +858,7 @@ def build_parser(prefix):
         "pid", formatter_class=core.HelpFormatter,
         help="controller tuning",
         description="Controller tuning. The device stores no preset identifier - "
-                    "the official software just writes these five numbers - so "
+                    "Aquasuite just writes these five numbers - so "
                     "--preset is a named set of them and any explicit flag wins.",
         epilog="presets           P     I     D   reset  hysteresis\n"
                "  fastest (+2)  4000  3500  1000   0.5s     0.10 K\n"

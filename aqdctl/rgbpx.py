@@ -40,7 +40,7 @@ RGB_MAPS = ((10, 12, 14, 15), (16, 18, 20, 21))
 RGB_PARAM = 22
 # The colour at +46 is HSV, not the Farbwerk 360's A/G/R/B palette: hue is a
 # BE16 over 0..1535 (six 256-step sectors), then saturation and value as bytes.
-# The official software's picker works in HSV as well, so what it shows as
+# Aquasuite's picker works in HSV as well, so what it shows as
 # RRGGBB is the lossy view: a colour typed here as RRGGBB can come out one step
 # off its saturation, without changing the colour the LEDs produce.
 RGB_COLOUR = 46        # 6 palette entries of 4 bytes
@@ -159,7 +159,7 @@ RGB_PALETTE_ROLES = {
 # it occupies entry 0 and the colours follow. Effects with a 'count' parameter
 # take a variable-length list and 'count' is derived from its length - never
 # typed by hand. Entries past 'count' seen in some captures are leftovers that
-# the official software does not clear.
+# Aquasuite does not clear.
 #
 # Confirmed on hardware: wave with count=1 fills 2 entries and with count=5 fills
 # 6; colour sequence, which has no background, fills exactly 'count'.
@@ -182,18 +182,16 @@ RGB_PALETTE_SPEC = {
     0x21: (False, 2, 4),
 }
 # Effects absent from the table take no user-settable colours: the rainbow family
-# generates its own, and the audio/ambient ones are driven from the host. Colour
-# gradient is the exception - it clearly uses the palette (the Octo's three-stop
-# gradient holds red, green and blue in entries 2-4), but which entry belongs to
-# which stop has not been captured, so it is listed apart rather than guessed.
+# generates its own, and the audio/ambient ones are driven from the host.
+
 # Where an effect's colours start in the palette. Colour gradient keeps entries
 # 0 and 1 out of it: they hold #000000 and #050505 in every gradient captured on
 # either device, which the owner identifies as the background colours the
-# official software writes by default. Its gradient panel has no background
+# Aquasuite writes by default. Its gradient panel has no background
 # control, so the effect does not use them.
 RGB_PALETTE_START = {0x21: 2}
 # Effects whose unused palette entries repeat the last colour instead of being
-# cleared, as the official software writes them.
+# cleared, as Aquasuite writes them.
 RGB_PALETTE_PAD = {0x21}
 # Effects that derive a parameter from the number of colours, other than the
 # plain 'count': {mode: (parameter, offset)}. A gradient of n colours has n-1
@@ -203,7 +201,7 @@ RGB_PALETTE_PAD = {0x21}
 # list, so the CLI derives it and never exposes it as a settable parameter.
 RGB_COUNT_PARAM = "count"
 RGB_DERIVED_COUNT = {0x21: ("limits", -1)}
-# Parameters the official software shows but does not let you move, so aqdctl
+# Parameters Aquasuite shows but does not let you move, so aqdctl
 # does not write them either: the gradient runs from its start to its end, and
 # only the limits in between can be placed.
 RGB_PARAM_FIXED = {0x21: ("start", "end")}
@@ -337,7 +335,7 @@ def empty_slot(layout, index):
 
 def parse_position(text, max_led):
     """'61-79' -> (start, count) with start 1-based inclusive, as shown by the
-    official software. The report stores start 0-based; the caller converts."""
+    Aquasuite. The report stores start 0-based; the caller converts."""
     part = str(text).split("-")
     if len(part) != 2:
         sys.exit("Position is FIRST-LAST, e.g. pos 1-15 for the first 15 LEDs.")
@@ -417,7 +415,7 @@ def describe_rgb(buf, layout, index, name, source_label):
     if effect and mode not in layout.verified:
         tag += "?"
     if mode in RGB_MODES_HOST_DRIVEN:
-        tag += "  [needs the official software running]"
+        tag += "  [needs Aquasuite running]"
     first = buf[base + RGB_START] + 1
     count = buf[base + RGB_COUNT_OFF]
     print("  %2d  %-18s channel %d, LEDs %d-%d   effect %s"
@@ -471,7 +469,7 @@ def describe_rgb(buf, layout, index, name, source_label):
 
     roles = palette_roles(mode)
     # Where a count follows from the colours, the entries past it are copies the
-    # official software leaves behind, not colours in use.
+    # Aquasuite leaves behind, not colours in use.
     used = None
     if mode in RGB_DERIVED_COUNT:
         key, offset = RGB_DERIVED_COUNT[mode]
@@ -603,7 +601,7 @@ def _apply_settings(dev, buf, after, base, args):
             _put_entry(after, base, entry + n, rgb)
             print("  colour %d: #%02X%02X%02X" % ((n + 1,) + rgb))
         if colours:
-            # Past the list: repeat the last colour where the official software
+            # Past the list: repeat the last colour where Aquasuite
             # does, otherwise clear the entries. Leaving stale colours behind
             # would show them back as if they were set.
             tail = base + RGB_COLOUR + 4 * (entry + len(colours) - 1)
@@ -633,7 +631,7 @@ def _apply_settings(dev, buf, after, base, args):
                      "and is not set by hand.")
         if key in RGB_PARAM_FIXED.get(mode, ()):
             sys.exit("'%s' cannot be moved: the effect runs from its start to its "
-                     "end, and\nthe official software does not let either move. Only "
+                     "end, and\nAquasuite does not let either move. Only "
                      "the limits in between\ncan be placed." % key)
         if mode in RGB_DERIVED_COUNT and key == RGB_DERIVED_COUNT[mode][0]:
             sys.exit("'%s' follows from the number of colours, so it comes from "
@@ -849,7 +847,7 @@ def cmd_rgb_effects(dev, args):
         return
 
     print("Effects, as stored in the report. Parameter values are whole numbers;")
-    print("most are 0-100 in the official software's sliders.\n")
+    print("most are 0-100 in Aquasuite's sliders.\n")
     for mode in sorted(RGB_MODES):
         if mode in RGB_MODES_UNIMPLEMENTED:
             continue
