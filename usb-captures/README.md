@@ -10,7 +10,7 @@ them.
 - Each capture holds one action, with a few seconds of quiet before and after
   it so the write stands out from the device's once-a-second live reports.
 - Both devices' serial numbers are zeroed in every live report (report 0x01,
-  bytes 0x03–0x06). The capture host's hardware and operating system strings
+  bytes 0x03-0x06). The capture host's hardware and operating system strings
   are removed from the file headers. Nothing else is changed.
 
 Wireshark opens these directly.

@@ -18,7 +18,7 @@ finding:
 
 - 14 equals 13: switching Aquasuite's curve setup from automatic to manual
   writes nothing.
-- 29–32 and 36: profile selections made while the Aquasuite service was
+- 29-32 and 36: profile selections made while the Aquasuite service was
   hung, which wrote nothing. 37 shows the write that followed.
 
 Name reports repeat wherever no name changed.
