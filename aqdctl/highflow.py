@@ -810,10 +810,11 @@ def cmd_chart(dev, args):
 # ../usb-captures/11-highflow-flow-calibration-min-max. The unit the software
 # puts beside the field was not recorded; the device stores the value x100.
 CALIBRATION_LIMIT = 50.0
-# What the u16 field can hold, in l/h. Aquasuite's own limits for the flow rates
-# have not been captured; the rates must rise, which is how every capture has
-# them and what the interpolation needs.
-POINT_MAX = 6553.5
+# Aquasuite's range for the flow rates, read off its UI by the owner rather than
+# from a capture. They must rise, which is how every capture has them and what
+# the interpolation between them needs; whether Aquasuite enforces that too is
+# not known.
+POINT_MIN, POINT_MAX = 0.0, 750.0
 
 
 def _ten(text, what):
@@ -844,9 +845,9 @@ def cmd_calibration(dev, args):
 
     if args.points is not None:
         new_rates = _ten(args.points, "flow rates, in l/h")
-        if any(not 0 < r <= POINT_MAX for r in new_rates):
-            sys.exit("Flow rates are 0.1-%g l/h, the range the field holds. What "
-                     "Aquasuite\nitself allows has not been captured." % POINT_MAX)
+        if any(not POINT_MIN <= r <= POINT_MAX for r in new_rates):
+            sys.exit("Flow rates are %g-%g l/h, the range Aquasuite allows."
+                     % (POINT_MIN, POINT_MAX))
         if any(b <= a for a, b in zip(new_rates, new_rates[1:])):
             sys.exit("The ten flow rates have to rise: the device interpolates "
                      "between them.\nGot %s." % ", ".join("%g" % r for r in new_rates))
@@ -1201,7 +1202,8 @@ def build_parser(prefix):
                "  {p} flow calibration --points 20,31,51,70,99,124,149,202,248,300"
                .format(p=prefix)))
     p.add_argument("--points", metavar="P1,...,P10",
-                   help="the ten flow rates in l/h, rising")
+                   help="the ten flow rates in l/h, %g-%g and rising"
+                        % (POINT_MIN, POINT_MAX))
     p.add_argument("--corrections", metavar="C1,...,C10",
                    help="the correction at each rate, %+g to %+g"
                         % (-CALIBRATION_LIMIT, CALIBRATION_LIMIT))

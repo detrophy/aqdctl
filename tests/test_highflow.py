@@ -960,13 +960,20 @@ else:
         bad.append("writing both extremes does not match Aquasuite's write: %s" % code)
 for line, why in (("flow calibration --points 20,31,51,70,99,124,149,202,248", "only nine rates"),
                   ("flow calibration --points 20,31,51,70,99,124,149,202,300,248", "not rising"),
-                  ("flow calibration --points 0,31,51,70,99,124,149,202,248,300", "a rate of 0"),
+                  ("flow calibration --points 20,31,51,70,99,124,149,202,248,751", "beyond 750 l/h"),
+                  ("flow calibration --points -1,31,51,70,99,124,149,202,248,300", "a negative rate"),
                   ("flow calibration --corrections 60,0,0,0,0,0,0,0,0,0", "beyond +50"),
                   ("flow calibration --corrections -50.1,0,0,0,0,0,0,0,0,0", "beyond -50")):
     fake = FakeHighflow()
     out, err, code = do(fake, line)
     if code is None or fake.written:
         bad.append("%s was accepted (%s)" % (line, why))
+fake = FakeHighflow()
+out, err, code = do(fake, "flow calibration --points 0,31,51,70,99,124,149,202,248,750")
+if code is not None or not fake.written:
+    bad.append("the ends of Aquasuite's range, 0 and 750 l/h, were refused: %s" % code)
+elif highflow.decode(fake.blobs[core.CTRL_REPORT_ID])["calibration_points"][:1] != (0,):
+    bad.append("a rate of 0 was not stored as 0")
 check("calibration: the table reads back, and bad input is refused", bad)
 
 print("\n%d/%d passed" % (checks - len(failures), checks))

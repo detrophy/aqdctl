@@ -137,10 +137,11 @@ from `68-display-chart1-1s-chart2-30s`.
   250 → 248 l/h) and every one of the ten corrections, one field per write.
   Each write touched only the two bytes of the value changed, so both strides
   hold across the whole array.
-- The rates rise in every capture. Aquasuite's own limits for the rates were
-  not captured, and neither was whether the table can hold other than ten
-  entries. The rates were back at their factory values by capture 11, so
-  something restores them; how was not captured either.
+- Aquasuite's range for the rates is 0–750 l/h, read off its UI by the owner
+  rather than from a capture. The rates rise in every capture, but whether the
+  software enforces that is not known, and neither is whether the table can
+  hold other than ten entries. The rates were back at their factory values by
+  capture 11, so something restores them; how was not captured either.
 
 Water quality is linear in conductivity:
 `(0% point − conductivity) / (0% point − 100% point)`. This was checked
