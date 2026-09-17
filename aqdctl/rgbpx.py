@@ -94,17 +94,23 @@ RGB_PARAM_NAMES = {
            "runtime", "interval_min", "interval_max"],
 }
 RGB_PARAM_NAMES[0x10] = RGB_PARAM_NAMES[0x11] = RGB_PARAM_NAMES[0x0F]
-# Colour gradient, from five USB captures of Aquasuite in ../usb-captures/ and
-# the owner's reading of its sliders:
+# Colour gradient, from six USB captures of Aquasuite in ../usb-captures/ and
+# the owner's reading of its panel. The gradient runs from a start to an end
+# that the software does not let you move, with up to three stops in between,
+# and each stretch between two of them takes one colour:
+#   0  the start, 0 in every gradient captured on either device
+#   1  the end, 1000 in every one of them
 #   2  rotation speed, moved 19 -> 20 -> 0 in 15-...-rotation-speed
-#   3  the number of stops, the boundaries inside the gradient
+#   3  the number of stops
 #   4-6  where each stop sits. 12-...-775-up-back-down moved the first, and it
 #      reads 775 in the software too, so a position is stored as shown;
 #      16-...-add-remove-limits names all three, 194-388-775. Unused positions
 #      repeat the last one.
-# Parameters 0 and 1 keep their index; 1 is 1000 in every gradient seen.
-RGB_PARAM_NAMES[0x21] = ["", "", "rotation_speed", "stops",
-                         "stop1_position", "stop2_position", "stop3_position"]
+# Parameters 7 and 8 are 0 in every gradient seen, which fits three stops being
+# the most the software offers.
+RGB_PARAM_NAMES[0x21] = ["start_position", "end_position", "rotation_speed",
+                         "stops", "stop1_position", "stop2_position",
+                         "stop3_position"]
 # Bitmasks in the flags byte at +5. fade on colour-change is directly confirmed;
 # the all-off captures confirm the others are absent, not their values.
 RGB_FLAG_NAMES = {
@@ -190,6 +196,10 @@ RGB_PALETTE_PAD = {0x21}
 # list, so the CLI derives it and never exposes it as a settable parameter.
 RGB_COUNT_PARAM = "count"
 RGB_DERIVED_COUNT = {0x21: ("stops", -1)}
+# Parameters the official software shows but does not let you move, so aqdctl
+# does not write them either: the gradient runs from its start to its end, and
+# only the stops in between can be placed.
+RGB_PARAM_FIXED = {0x21: ("start_position", "end_position")}
 
 # A controller slot as the device leaves it when nothing is configured: mode 0,
 # one LED, no data source, filters at 10/15, both mapping blocks neutral. Taken
@@ -608,6 +618,10 @@ def _apply_settings(dev, buf, after, base, args):
         if key == RGB_COUNT_PARAM:
             sys.exit("'count' is the number of colours, so it comes from --colour "
                      "and is not set by hand.")
+        if key in RGB_PARAM_FIXED.get(mode, ()):
+            sys.exit("'%s' cannot be moved: the effect runs from its start to its "
+                     "end, and\nthe official software does not let either move. Only "
+                     "the stops in between\ncan be placed." % key)
         if mode in RGB_DERIVED_COUNT and key == RGB_DERIVED_COUNT[mode][0]:
             sys.exit("'%s' follows from the number of colours, so it comes from "
                      "--colour:\n%d colours make %d." % (key, 4, 4 + RGB_DERIVED_COUNT[mode][1]))
@@ -802,7 +816,8 @@ def cmd_rgb_effects(dev, args):
                         % ",".join(["RRGGBB"] * lo)
                         + ("[,...up to %d]" % hi if hi > lo else ""))
             print("  colours   : %s" % "  ".join(bits))
-        derived = {RGB_COUNT_PARAM, RGB_DERIVED_COUNT.get(mode, ("",))[0]}
+        derived = ({RGB_COUNT_PARAM, RGB_DERIVED_COUNT.get(mode, ("",))[0]}
+                   | set(RGB_PARAM_FIXED.get(mode, ())))
         names = [n for n in RGB_PARAM_NAMES.get(mode, []) if n and n not in derived]
         print("  parameters: %s"
               % (", ".join("%s=N" % n for n in names) if names else "none"))

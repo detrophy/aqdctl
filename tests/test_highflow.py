@@ -1110,6 +1110,18 @@ else:
                        % (argv, ", ".join(hex(i) for i in set(diff) - set(off_by_one))))
         elif not diff and bytes(written) != bytes(target):
             bad.append("capture 16: %r left a stale checksum" % argv)
+    # the start and the end are 0 and 1000 in every gradient, and unwritable
+    for buf in w:
+        if (rgbpx.get_param(buf, base, 0), rgbpx.get_param(buf, base, 1)) != (0, 1000):
+            bad.append("capture 16: the start and end are not 0 and 1000")
+    for key in ("start_position", "end_position"):
+        if key not in rgbpx.RGB_PARAM_NAMES[0x21]:
+            bad.append("%s is not named" % key)
+        fake = FakeHighflow()
+        fake.blobs[core.CTRL_REPORT_ID] = bytearray(w[0])
+        out, err, code = do(fake, "rgb set controller 1 --param %s=500" % key)
+        if code is None or "cannot be moved" not in flat(code) or fake.written:
+            bad.append("%s was written: %r" % (key, code))
     # the stop count follows from the colours and cannot be typed
     for line, why in (("rgb set controller 1 --colour %s" % YELLOW, "one colour"),
                       ("rgb set controller 1 --colour " + ",".join([YELLOW] * 5), "five"),
