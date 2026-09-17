@@ -102,6 +102,17 @@ CASES = [
                                            linear=[27.0, 45.0, 0.0, 50.0]), "exit"),
     ("curve startup", m.cmd_mode_curve, ns(channel=7, points=None, linear=None,
                                            startup=30.0), None),
+    # CURVE_TEMP_MAX is aqdctl's own bound, not the device's: at it, and past it
+    ("curve at max",  m.cmd_mode_curve, ns(channel=7, points=None, startup=None,
+                                           linear=[30.0, m.CURVE_TEMP_MAX,
+                                                   0.0, 50.0]), None),
+    ("curve over max",m.cmd_mode_curve, ns(channel=7, points=None, startup=None,
+                                           linear=[30.0, m.CURVE_TEMP_MAX + 1,
+                                                   0.0, 50.0]), "exit"),
+    ("startup at max",m.cmd_mode_curve, ns(channel=7, points=None, linear=None,
+                                           startup=m.CURVE_TEMP_MAX), None),
+    ("startup over",  m.cmd_mode_curve, ns(channel=7, points=None, linear=None,
+                                           startup=m.CURVE_TEMP_MAX + 0.01), "exit"),
     ("mode follow",   m.cmd_mode_follow,ns(channel=6, target=3), None),
     ("follow self",   m.cmd_mode_follow,ns(channel=6, target=6), "exit"),
 

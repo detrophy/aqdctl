@@ -133,6 +133,12 @@ def mode_name(value):
 # Aquasuite's "automatic" and "manual" setup are the same stored data - the
 # automatic dialog just fills these 16 points for you; switching between the
 # two writes nothing.
+# aqdctl's own bound on the temperatures of a curve and on the startup
+# temperature. The report stores hundredths of a degree, so the field itself
+# holds far more, and Aquasuite's own limit was never captured; 100 C is past
+# anything a water loop reaches and keeps a typo like 1500 out of the device.
+CURVE_TEMP_MAX = 100.0
+
 CURVE_TEMPS = 0x14
 CURVE_POWERS = 0x34
 CURVE_POINTS = 16
@@ -411,15 +417,16 @@ def cmd_mode_curve(dev, args):
 
     if points is not None:
         for t, p in points:
-            if not 0 <= t <= 150 or not 0 <= p <= 100:
-                sys.exit("Temperatures must be 0-150 C and powers 0-100%.")
+            if not 0 <= t <= CURVE_TEMP_MAX or not 0 <= p <= 100:
+                sys.exit("Temperatures must be 0-%g C and powers 0-100%%."
+                         % CURVE_TEMP_MAX)
         write_curve(after, args.channel, points)
         print("  curve: %.1f-%.1f C -> %.1f-%.1f%%"
               % (points[0][0], points[-1][0], points[0][1], points[-1][1]))
 
     if args.startup is not None:
-        if not 0 <= args.startup <= 150:
-            sys.exit("Startup temperature must be 0-150 C.")
+        if not 0 <= args.startup <= CURVE_TEMP_MAX:
+            sys.exit("Startup temperature must be 0-%g C." % CURVE_TEMP_MAX)
         print("  startup: %.2f C -> %.2f C"
               % (be16(before, base + OFF_STARTUP) / 100.0, args.startup))
         put_be16(after, base + OFF_STARTUP, int(round(args.startup * 100)))
@@ -802,7 +809,7 @@ def build_parser(prefix):
                    help="generate the 16 points as a straight line between two "
                         "temperatures (C) and two powers (%%)")
     p.add_argument("--startup", type=float, metavar="CELSIUS",
-                   help="startup temperature, 0-150 C")
+                   help="startup temperature, 0-%g C" % CURVE_TEMP_MAX)
     p.add_argument("--sensor", metavar="S",
                    help="which sensor drives it: 1-4, 'flow', or '#N' for a raw index")
     p.set_defaults(func=cmd_mode_curve)
