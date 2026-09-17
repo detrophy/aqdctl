@@ -91,6 +91,13 @@ RGB_PARAM_NAMES = {
            "runtime", "interval_min", "interval_max"],
 }
 RGB_PARAM_NAMES[0x10] = RGB_PARAM_NAMES[0x11] = RGB_PARAM_NAMES[0x0F]
+# Colour gradient is only partly mapped. The owner confirmed parameter 3 is the
+# number of gradient stops, which matches the captures: three on the Octo
+# (octo/12-rgb-effect-catalogue-4, stops at 250, 500 and 750) and one on the
+# high flow NEXT. The rest keep their index in the output rather than a guessed
+# name - in particular parameter 4, the value moved in
+# ../usb-captures/12-highflow-rgb-gradient-775-up-back-down.
+RGB_PARAM_NAMES[0x21] = ["", "", "", "stops"]
 # Bitmasks in the flags byte at +5. fade on colour-change is directly confirmed;
 # the all-off captures confirm the others are absent, not their values.
 RGB_FLAG_NAMES = {
@@ -113,6 +120,11 @@ RGB_FLAG_NAMES[0x0C] = {"reverse": 0x02}
 RGB_FLAG_NAMES[0x13] = {"reverse": 0x01}
 RGB_FLAG_NAMES[0x07] = {"reverse": 0x02, "fade": 0x04, "random_colour": 0x08}
 RGB_FLAG_NAMES[0x0B] = {"reverse": 0x02, "random_colour": 0x08}
+# Both captured on the high flow NEXT, each switched on and off again:
+# ../usb-captures/13-...-reverse-direction and 14-...-reverse-rotation. Bits
+# 0x01, 0x02 and 0x04 are set in every gradient seen so far, on both devices,
+# and no capture has moved them.
+RGB_FLAG_NAMES[0x21] = {"reverse_direction": 0x08, "reverse_rotation": 0x10}
 # Which palette entries an effect uses, and what they mean.
 RGB_PALETTE_ROLES = {
     0x01: ["colour"],
@@ -148,7 +160,11 @@ RGB_PALETTE_SPEC = {
     0x11: (True, 1, 1),       # stardust
 }
 # Effects absent from the table take no user-settable colours: the rainbow family
-# generates its own, and the audio/ambient ones are driven from the host.
+# generates its own, and the audio/ambient ones are driven from the host. Colour
+# gradient is the exception - it clearly uses the palette (the Octo's three-stop
+# gradient holds red, green and blue in entries 2-4), but which entry belongs to
+# which stop has not been captured, so it is listed apart rather than guessed.
+RGB_PALETTE_UNMAPPED = {0x21}
 
 # The 'count' parameter of a variable-length effect is the length of its colour
 # list, so the CLI derives it and never exposes it as a settable parameter.
@@ -264,6 +280,8 @@ def palette_roles(mode):
     """Role of each palette entry, in order, for an effect. Derived from
     RGB_PALETTE_SPEC so it says the same thing as 'rgb effects' and as the
     validation in 'rgb create' and 'rgb set'."""
+    if mode in RGB_PALETTE_UNMAPPED:
+        return ["colour, role not mapped"] * RGB_PALETTE_ENTRIES
     has_bg, _lo, hi = RGB_PALETTE_SPEC.get(mode, (False, 0, 0))
     roles = ["background"] if has_bg else []
     # A single-colour effect just has "colour"; numbering one thing is noise.
@@ -506,6 +524,10 @@ def _apply_settings(dev, buf, after, base, args):
     if args.colour is not None or args.background is not None:
         has_bg, lo, hi = RGB_PALETTE_SPEC.get(mode, (False, 0, 0))
         effect = RGB_MODES.get(mode, "%#04x" % mode)
+        if mode in RGB_PALETTE_UNMAPPED:
+            sys.exit("Effect '%s' does use colours, but which palette entry is which "
+                     "has\nnot been captured, so aqdctl will not write them. Set them "
+                     "in the official\nsoftware." % effect)
         if hi == 0:
             sys.exit("Effect '%s' takes no colours of its own. "
                      "'rgb effects %s' explains what it does accept."
@@ -735,7 +757,11 @@ def cmd_rgb_effects(dev, args):
             print("  animation is streamed from an Aquasuite host DLL, so the LEDs")
             print("  sit at their background with nothing running.")
         has_bg, lo, hi = RGB_PALETTE_SPEC.get(mode, (False, 0, 0))
-        if hi == 0:
+        if mode in RGB_PALETTE_UNMAPPED:
+            print("  colours   : used by the effect, but which palette entry is")
+            print("              which has not been captured - set them in the")
+            print("              official software")
+        elif hi == 0:
             print("  colours   : none (the effect generates its own)")
         else:
             bits = []

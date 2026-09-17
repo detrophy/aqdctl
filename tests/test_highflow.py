@@ -976,5 +976,70 @@ elif highflow.decode(fake.blobs[core.CTRL_REPORT_ID])["calibration_points"][:1] 
     bad.append("a rate of 0 was not stored as 0")
 check("calibration: the table reads back, and bad input is refused", bad)
 
+
+# --------------------------- colour gradient, from the USB captures 12-14
+# Each capture switches one control and puts it back, so one write must turn
+# into the other with the matching flag or parameter.
+GRADIENT = os.path.join(ROOT, "usb-captures", "%s.pcapng")
+bad = []
+for name, flag, bit in (("13-highflow-rgb-gradient-reverse-direction-on-then-off",
+                         "reverse_direction", 0x08),
+                        ("14-highflow-rgb-gradient-reverse-rotation-on-then-off",
+                         "reverse_rotation", 0x10)):
+    w = usb_writes(GRADIENT % name)
+    if len(w) != 2:
+        bad.append("%s: expected 2 writes, found %d" % (name[:2], len(w)))
+        continue
+    on, off = w                      # the capture switches it on, then off again
+    base = highflow.RGB.slot_base(1) + rgbpx.RGB_FLAGS_OFFSET
+    if not (on[base] & bit) or off[base] & bit:
+        bad.append("%s: %#04x is not the bit that moved (%#04x -> %#04x)"
+                   % (name[:2], bit, on[base], off[base]))
+    if rgbpx.RGB_FLAG_NAMES[0x21].get(flag) != bit:
+        bad.append("%s: the table does not map %s to %#04x" % (name[:2], flag, bit))
+    for source, target, argv in ((off, on, "--flag " + flag),
+                                 (on, off, "--no-flag " + flag)):
+        fake = FakeHighflow()
+        fake.blobs[core.CTRL_REPORT_ID] = bytearray(source)
+        out, err, code = do(fake, "rgb set controller 1 " + argv)
+        if code is not None or bytes(fake.blobs[core.CTRL_REPORT_ID]) != bytes(target):
+            bad.append("%s: 'rgb set controller 1 %s' does not reproduce the capture: %s"
+                       % (name[:2], argv, code))
+
+w = usb_writes(GRADIENT % "12-highflow-rgb-gradient-775-up-back-down")
+if len(w) != 2:
+    bad.append("capture 12: expected 2 writes, found %d" % len(w))
+else:
+    base = highflow.RGB.slot_base(1)
+    moved = [k for k in range(9)
+             if rgbpx.get_param(w[0], base, k) != rgbpx.get_param(w[1], base, k)]
+    if moved != [4] or (rgbpx.get_param(w[0], base, 4),
+                        rgbpx.get_param(w[1], base, 4)) != (777, 775):
+        bad.append("capture 12: parameters %s moved, expected only 4 (777 -> 775)" % moved)
+    fake = FakeHighflow()
+    fake.blobs[core.CTRL_REPORT_ID] = bytearray(w[1])
+    out, err, code = do(fake, "rgb set controller 1 --param 4=777")
+    if code is not None or bytes(fake.blobs[core.CTRL_REPORT_ID]) != bytes(w[0]):
+        bad.append("capture 12: setting parameter 4 does not reproduce the capture: %s" % code)
+    # parameter 3 is the number of stops, which the owner confirmed
+    if rgbpx.RGB_PARAM_NAMES[0x21][3] != "stops" or rgbpx.get_param(w[0], base, 3) != 1:
+        bad.append("capture 12: the stop count is not where the table says")
+
+# what is named shows up, what is not stays raw and unwritable
+out = io.StringIO()
+with contextlib.redirect_stdout(out):
+    rgbpx.describe_rgb(usb_writes(GRADIENT % "13-highflow-rgb-gradient-reverse-direction-on-then-off")[0],
+                       highflow.RGB, 1, "strip", highflow.source_label)
+text = out.getvalue()
+for want in ("stops=1", "reverse_direction", "unknown bits 0x07", "role not mapped"):
+    if want not in text:
+        bad.append("'info rgb' on a gradient lacks %r:\n%s" % (want, text))
+fake = FakeHighflow()
+fake.blobs[core.CTRL_REPORT_ID] = bytearray(usb_writes(GRADIENT % "12-highflow-rgb-gradient-775-up-back-down")[0])
+out, err, code = do(fake, "rgb set controller 1 --colour FF0000")
+if code is None or "has not been captured" not in flat(code) or fake.written:
+    bad.append("a colour on an unmapped palette was accepted: %r" % code)
+check("colour gradient: the two captured flags and the stop count are named", bad)
+
 print("\n%d/%d passed" % (checks - len(failures), checks))
 sys.exit(1 if failures else 0)
