@@ -116,8 +116,8 @@ from `68-display-chart1-1s-chart2-30s`.
 | 0x02d  | s16       | external temperature offset, 0.01 °C (−0.8 → −1.3 = −80 → −130) | `69-external-sensor-offset-minus-0.8-to-minus-1.3` |
 | 0x02f  | u8        | coolant: 0 DP Ultra, 1 distilled water                    | `06-flow-coolant-dp-ultra-to-distilled`    |
 | 0x030  | u8        | connector: 0 larger than 7 mm, 1 smaller than 7 mm        | `07-flow-connector-over-7mm-to-under-7mm` |
-| 0x031  | 10 × s16  | manual calibration, correction per point, ×100 (−1 → −100) | `08-flow-manual-calibration-set`   |
-| 0x045  | 10 × u16  | calibration points, dL/h: 200 … 3000 = 20 … 300 l/h       | content matches Aquasuite      |
+| 0x031  | 10 × s16  | manual calibration, correction per point, ×100 (−1 → −100) | `08-flow-manual-calibration-set`, `../usb-captures/10-highflow-flow-calibration` |
+| 0x045  | 10 × u16  | the flow rates those corrections apply at, dL/h: 200 … 3000 = 20 … 300 l/h | `../usb-captures/10-highflow-flow-calibration` |
 | 0x292  | u16       | water quality 100 % point, 0.1 µS/cm (12.8 → 13.3)        | `05-water-quality-range-12.8-50.0-to-13.3-50.5`      |
 | 0x294  | u16       | water quality 0 % point, 0.1 µS/cm (50.0 → 50.5)          | `05-water-quality-range-12.8-50.0-to-13.3-50.5`      |
 
@@ -129,8 +129,16 @@ from `68-display-chart1-1s-chart2-30s`.
 - For 0x02f and 0x030, other values of the coolant and connector lists are
   unknown.
 - The correction unit at 0x031 was not recorded; the stored value is the
-  entered value × 100.
-- No capture changed the calibration points at 0x045.
+  entered value × 100. Values from −1 to +2 have been written.
+- Both arrays are writable and fully confirmed: in
+  `../usb-captures/10-highflow-flow-calibration` Aquasuite moved seven of the
+  ten rates (30 → 31, 50 → 51, 100 → 99, 125 → 124, 150 → 149, 200 → 202,
+  250 → 248 l/h) and every one of the ten corrections, one field per write.
+  Each write touched only the two bytes of the value changed, so both strides
+  hold across the whole array.
+- The rates rise in every capture. Aquasuite's own limits for them, and for
+  the corrections, were not captured, and neither was whether the table can
+  hold other than ten entries.
 
 Water quality is linear in conductivity:
 `(0% point − conductivity) / (0% point − 100% point)`. This was checked

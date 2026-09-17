@@ -408,6 +408,8 @@ def info_flow(s, live):
                    for point, value in zip(s["calibration_points"], s["calibration"])
                    if value]
     print("  calibration       %s" % (", ".join(corrections) or "no corrections"))
+    print("  calibrated at     %s l/h"
+          % ", ".join("%g" % (p / 10.0) for p in s["calibration_points"]))
     if live.get("volume") is not None:
         print("  volume            %d l, %d impulses, %s since the last reset"
               % (live["volume"], live["impulses"], _duration(live["since_reset"])))
@@ -804,36 +806,74 @@ def cmd_chart(dev, args):
                                         text(be16(after, base), be16(after, base + 2)))])
 
 
-CALIBRATION_LIMIT = 50.0    # my bound: the unit is unrecorded, the captures used +-1
+# aqdctl's own bound: the correction's unit was never recorded, and the captures
+# only ever used -1 to +2. The device's field holds +-327.67.
+CALIBRATION_LIMIT = 50.0
+# What the u16 field can hold, in l/h. Aquasuite's own limits for the flow rates
+# have not been captured; the rates must rise, which is how every capture has
+# them and what the interpolation needs.
+POINT_MAX = 6553.5
 
 
-def cmd_calibration(dev, args):
-    before = dev.read()
-    s = decode(before)
-
-    def text(values):
-        return ", ".join("%g l/h: %+.2f" % (p / 10.0, v / 100.0)
-                         for p, v in zip(s["calibration_points"], values))
-    if args.values is None:
-        print("flow calibration: %s" % text(s["calibration"]))
-        return
+def _ten(text, what):
     try:
-        values = [float(v) for v in args.values.split(",")]
+        values = [float(v) for v in text.split(",")]
     except ValueError:
         values = []
     if len(values) != CALIBRATION_COUNT:
-        sys.exit("Give all ten corrections, comma separated, in the order of the points "
-                 "(%s l/h). 'flow calibration' shows the current ones."
-                 % ", ".join("%g" % (p / 10.0) for p in s["calibration_points"]))
-    if not all(abs(v) <= CALIBRATION_LIMIT for v in values):
-        sys.exit("Corrections are limited to +-%g here: the unit was not recorded, and "
-                 "the captures used +-1." % CALIBRATION_LIMIT)
+        sys.exit("Give all ten %s, comma separated. 'flow calibration' shows the "
+                 "current ones." % what)
+    return values
+
+
+def _pair(old, new, fmt):
+    """'20.0' if it stays, '20.0 -> 31.0' if it moves."""
+    return fmt % old if old == new else (fmt + " -> " + fmt) % (old, new)
+
+
+def cmd_calibration(dev, args):
+    """The ten flow rates and the correction at each. Both arrays are confirmed
+    by 10-highflow-flow-calibration in ../usb-captures/, where Aquasuite moved
+    every entry of both."""
+    before = dev.read()
+    s = decode(before)
+    rates = [p / 10.0 for p in s["calibration_points"]]
+    values = [c / 100.0 for c in s["calibration"]]
     after = bytearray(before)
-    raw = [int(round(v * 100)) for v in values]
-    for i, value in enumerate(raw):
-        struct.pack_into(">h", after, CALIBRATION + 2 * i, value)
-    _commit(dev, before, after, args, ["flow calibration: %s" % text(s["calibration"]),
-                                       "               -> %s" % text(raw)])
+
+    if args.points is not None:
+        new_rates = _ten(args.points, "flow rates, in l/h")
+        if any(not 0 < r <= POINT_MAX for r in new_rates):
+            sys.exit("Flow rates are 0.1-%g l/h, the range the field holds. What "
+                     "Aquasuite\nitself allows has not been captured." % POINT_MAX)
+        if any(b <= a for a, b in zip(new_rates, new_rates[1:])):
+            sys.exit("The ten flow rates have to rise: the device interpolates "
+                     "between them.\nGot %s." % ", ".join("%g" % r for r in new_rates))
+        for i, rate in enumerate(new_rates):
+            core.put_be16(after, CALIBRATION_POINTS + 2 * i, int(round(rate * 10)))
+    else:
+        new_rates = rates
+
+    if args.corrections is not None:
+        new_values = _ten(args.corrections, "corrections")
+        if any(abs(v) > CALIBRATION_LIMIT for v in new_values):
+            sys.exit("Corrections are limited to +-%g here: the unit was never "
+                     "recorded, and\nthe captures only used -1 to +2."
+                     % CALIBRATION_LIMIT)
+        for i, value in enumerate(new_values):
+            struct.pack_into(">h", after, CALIBRATION + 2 * i, int(round(value * 100)))
+    else:
+        new_values = values
+
+    lines = ["flow calibration", "   #   flow rate            correction"]
+    for i in range(CALIBRATION_COUNT):
+        lines.append("  %2d   %-20s %s"
+                     % (i + 1, _pair(rates[i], new_rates[i], "%g") + " l/h",
+                        _pair(values[i], new_values[i], "%+.2f")))
+    if args.points is None and args.corrections is None:
+        print("\n".join(lines))
+        return
+    _commit(dev, before, after, args, lines)
 
 
 def cmd_offset(dev, args):
@@ -1149,12 +1189,21 @@ def build_parser(prefix):
             {0: "over-7mm", 1: "under-7mm"}, "flow connector")
     p = writer(fsub.add_parser(
         "calibration", formatter_class=core.HelpFormatter,
-        help="manual correction at ten flow rates",
-        description="Aquasuite's manual calibration: one correction for each of ten "
-                    "flow rates, 20-300 l/h. The flow alarm sees the corrected flow.",
-        epilog="example:  %s flow calibration -1,1,1,0,0,0,0,0,0,0" % prefix))
-    p.add_argument("values", nargs="?", metavar="C1,...,C10",
-                   help="ten corrections, comma separated (omit to show)")
+        help="the ten flow rates and the correction at each",
+        description="Aquasuite's manual calibration: ten flow rates and the "
+                    "correction applied at each of them. Both are settable, ten "
+                    "values at a time; with neither flag the table is printed. "
+                    "The flow alarm sees the corrected flow.",
+        epilog="The factory rates are 20,30,50,70,100,125,150,200,250,300 l/h.\n\n"
+               "examples:\n"
+               "  {p} flow calibration\n"
+               "  {p} flow calibration --corrections -1,1,1,0,0,0,0,0,0,0\n"
+               "  {p} flow calibration --points 20,31,51,70,99,124,149,202,248,300"
+               .format(p=prefix)))
+    p.add_argument("--points", metavar="P1,...,P10",
+                   help="the ten flow rates in l/h, rising")
+    p.add_argument("--corrections", metavar="C1,...,C10",
+                   help="the correction at each rate, +-%g" % CALIBRATION_LIMIT)
     p.set_defaults(func=cmd_calibration)
 
     # -------------------------------------------------------------- sensor

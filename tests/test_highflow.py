@@ -7,7 +7,7 @@ Aquasuite (the file name says which) and undid the one before. So each
 capture's decoded settings must show the named change, and must differ from
 the capture before it only in that change and the undo.
 """
-import argparse, builtins, contextlib, glob, io, os, shlex, shutil, sys, tempfile
+import argparse, builtins, contextlib, glob, io, os, shlex, shutil, struct, sys, tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -483,7 +483,7 @@ def changed_bytes(a, b):
 REPLAY = {
     3: "rgb switch on", 4: "rgb brightness 45",
     5: "sensor water-quality 13.3 50.5", 6: "flow coolant distilled",
-    7: "flow connector under-7mm", 8: "flow calibration -1,1,1,0,0,0,0,0,0,0",
+    7: "flow connector under-7mm", 8: "flow calibration --corrections -1,1,1,0,0,0,0,0,0,0",
     9: "sensor offset internal -0.5",
     10: "display brightness medium", 11: "display brightness high",
     12: "display idle-brightness low", 13: "display idle-brightness medium",
@@ -827,7 +827,8 @@ forms = ["info", "info alarm", "display brightness high", "display brightness",
          "display menu-lock on", "display units temperature fahrenheit",
          "display units flow gallons", "display chart 1 --source flow --interval 60",
          "display chart 4", "flow coolant distilled", "flow connector over-7mm",
-         "flow calibration", "flow calibration -1,1,1,0,0,0,0,0,0,0",
+         "flow calibration", "flow calibration --corrections -1,1,1,0,0,0,0,0,0,0",
+         "flow calibration --points 20,31,51,70,99,124,149,202,248,300",
          "sensor offset internal -0.5", "sensor offset external",
          "sensor water-quality 12.8 50", "sensor water-quality",
          "alarm flow on --limit 45", "alarm flow --limit 45", "alarm flow",
@@ -865,6 +866,90 @@ check("command forms: %d parse, %d malformed ones refused" % (len(forms), len(ma
 
 core.data_dir = real_data_dir
 shutil.rmtree(BACKUPS)
+
+
+# ------------------------------ Aquasuite's own calibration edits (USB capture)
+# 10-highflow-flow-calibration.pcapng holds 18 settings writes, one per field
+# Aquasuite changed: seven of the ten flow rates and all ten corrections. Each
+# write differs from the one before in exactly one value, so the matching
+# command, applied to one write, must reproduce the next byte for byte.
+def usb_writes(path):
+    """The 682-byte SET_REPORT(feature) payloads of a USBPcap file, in order."""
+    data, off, out = open(path, "rb").read(), 0, []
+    while off < len(data):
+        btype, blen = struct.unpack_from("<II", data, off)
+        if blen < 12:
+            break
+        if btype == 6:                                  # enhanced packet block
+            caplen = struct.unpack_from("<I", data, off + 20)[0]
+            pkt = data[off + 28: off + 28 + caplen]
+            hlen, xfer = struct.unpack_from("<H", pkt, 0)[0], pkt[22]
+            if xfer == 2 and caplen >= hlen + 8 and pkt[27] == 0:
+                setup, payload = pkt[28:36], pkt[36:hlen + 8 + 682]
+                if setup[0] == 0x21 and len(payload) == highflow.CTRL_REPORT_SIZE:
+                    out.append(bytearray(payload))
+        off += blen
+    return out
+
+
+CAP = os.path.join(ROOT, "usb-captures", "10-highflow-flow-calibration.pcapng")
+bad = []
+writes = usb_writes(CAP)
+if len(writes) != 18:
+    bad.append("expected 18 settings writes in the capture, found %d" % len(writes))
+for n, buf in enumerate(writes, 1):
+    stored, computed = core.report_crc(buf)
+    if stored != computed:
+        bad.append("write %d has a bad checksum" % n)
+for n in range(1, len(writes)):
+    before, target = writes[n - 1], writes[n]
+    a, b = highflow.decode(before), highflow.decode(target)
+    argv = []
+    if a["calibration_points"] != b["calibration_points"]:
+        argv.append("--points " + ",".join("%g" % (p / 10.0) for p in b["calibration_points"]))
+    if a["calibration"] != b["calibration"]:
+        argv.append("--corrections " + ",".join("%g" % (c / 100.0) for c in b["calibration"]))
+    if not argv:
+        bad.append("writes %d and %d differ outside the calibration" % (n, n + 1))
+        continue
+    fake = FakeHighflow()
+    fake.blobs[core.CTRL_REPORT_ID] = bytearray(before)
+    out, err, code = do(fake, "flow calibration " + " ".join(argv))
+    written = fake.blobs[core.CTRL_REPORT_ID]
+    if code is not None:
+        bad.append("write %d: refused: %s" % (n + 1, code))
+    elif bytes(written) != bytes(target):
+        diff = [hex(i) for i in range(len(target)) if written[i] != target[i]]
+        bad.append("write %d: differs from Aquasuite's at %s" % (n + 1, ", ".join(diff)))
+check("the %d calibration edits in Aquasuite's USB capture are reproduced exactly"
+      % (len(writes) - 1), bad)
+
+# the rates the tool reads back are the ones Aquasuite shows
+first, last = highflow.decode(writes[0]), highflow.decode(writes[-1])
+bad = []
+if [p / 10.0 for p in first["calibration_points"]] != [20, 30, 50, 70, 100, 125, 150, 200, 250, 300]:
+    bad.append("the capture does not start from the factory rates: %s" % (first["calibration_points"],))
+if [p / 10.0 for p in last["calibration_points"]] != [20, 31, 51, 70, 99, 124, 149, 202, 248, 300]:
+    bad.append("end rates: %s" % (last["calibration_points"],))
+if [c / 100.0 for c in last["calibration"]] != [0, 1, 1, 1, -1, -1, -1, 1, -1, 2]:
+    bad.append("end corrections: %s" % (last["calibration"],))
+fake = FakeHighflow()
+fake.blobs[core.CTRL_REPORT_ID] = bytearray(writes[-1])
+out, err, code = do(fake, "flow calibration")
+for text in ("20 l/h", "31 l/h", "+1.00", "-1.00", "+2.00"):
+    if text not in out:
+        bad.append("the table does not show %r:\n%s" % (text, out))
+if fake.written:
+    bad.append("showing the table wrote to the device")
+for line, why in (("flow calibration --points 20,31,51,70,99,124,149,202,248", "only nine rates"),
+                  ("flow calibration --points 20,31,51,70,99,124,149,202,300,248", "not rising"),
+                  ("flow calibration --points 0,31,51,70,99,124,149,202,248,300", "a rate of 0"),
+                  ("flow calibration --corrections 60,0,0,0,0,0,0,0,0,0", "beyond the bound")):
+    fake = FakeHighflow()
+    out, err, code = do(fake, line)
+    if code is None or fake.written:
+        bad.append("%s was accepted (%s)" % (line, why))
+check("calibration: the table reads back, and bad input is refused", bad)
 
 print("\n%d/%d passed" % (checks - len(failures), checks))
 sys.exit(1 if failures else 0)
