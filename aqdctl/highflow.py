@@ -806,8 +806,9 @@ def cmd_chart(dev, args):
                                         text(be16(after, base), be16(after, base + 2)))])
 
 
-# aqdctl's own bound: the correction's unit was never recorded, and the captures
-# only ever used -1 to +2. The device's field holds +-327.67.
+# Aquasuite's own limit, both ends written in
+# ../usb-captures/11-highflow-flow-calibration-min-max. The unit the software
+# puts beside the field was not recorded; the device stores the value x100.
 CALIBRATION_LIMIT = 50.0
 # What the u16 field can hold, in l/h. Aquasuite's own limits for the flow rates
 # have not been captured; the rates must rise, which is how every capture has
@@ -857,9 +858,8 @@ def cmd_calibration(dev, args):
     if args.corrections is not None:
         new_values = _ten(args.corrections, "corrections")
         if any(abs(v) > CALIBRATION_LIMIT for v in new_values):
-            sys.exit("Corrections are limited to +-%g here: the unit was never "
-                     "recorded, and\nthe captures only used -1 to +2."
-                     % CALIBRATION_LIMIT)
+            sys.exit("Corrections are %+g to %+g, the range Aquasuite allows."
+                     % (-CALIBRATION_LIMIT, CALIBRATION_LIMIT))
         for i, value in enumerate(new_values):
             struct.pack_into(">h", after, CALIBRATION + 2 * i, int(round(value * 100)))
     else:
@@ -1203,7 +1203,8 @@ def build_parser(prefix):
     p.add_argument("--points", metavar="P1,...,P10",
                    help="the ten flow rates in l/h, rising")
     p.add_argument("--corrections", metavar="C1,...,C10",
-                   help="the correction at each rate, +-%g" % CALIBRATION_LIMIT)
+                   help="the correction at each rate, %+g to %+g"
+                        % (-CALIBRATION_LIMIT, CALIBRATION_LIMIT))
     p.set_defaults(func=cmd_calibration)
 
     # -------------------------------------------------------------- sensor

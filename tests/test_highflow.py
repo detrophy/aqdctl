@@ -941,10 +941,28 @@ for text in ("20 l/h", "31 l/h", "+1.00", "-1.00", "+2.00"):
         bad.append("the table does not show %r:\n%s" % (text, out))
 if fake.written:
     bad.append("showing the table wrote to the device")
+# 11-...-min-max: Aquasuite wrote both ends of the correction range, +50 and
+# -50. Its second write must come out of the first one exactly.
+minmax = usb_writes(os.path.join(ROOT, "usb-captures",
+                                 "11-highflow-flow-calibration-min-max.pcapng"))
+if len(minmax) != 2:
+    bad.append("expected 2 writes in the min/max capture, found %d" % len(minmax))
+else:
+    ends = [c / 100.0 for c in highflow.decode(minmax[-1])["calibration"]]
+    if (max(ends), min(ends)) != (highflow.CALIBRATION_LIMIT, -highflow.CALIBRATION_LIMIT):
+        bad.append("the capture's extremes are %r, the bound is +-%g"
+                   % (ends, highflow.CALIBRATION_LIMIT))
+    fake = FakeHighflow()
+    fake.blobs[core.CTRL_REPORT_ID] = bytearray(minmax[0])
+    out, err, code = do(fake, "flow calibration --corrections "
+                        + ",".join("%g" % c for c in ends))
+    if code is not None or bytes(fake.blobs[core.CTRL_REPORT_ID]) != bytes(minmax[1]):
+        bad.append("writing both extremes does not match Aquasuite's write: %s" % code)
 for line, why in (("flow calibration --points 20,31,51,70,99,124,149,202,248", "only nine rates"),
                   ("flow calibration --points 20,31,51,70,99,124,149,202,300,248", "not rising"),
                   ("flow calibration --points 0,31,51,70,99,124,149,202,248,300", "a rate of 0"),
-                  ("flow calibration --corrections 60,0,0,0,0,0,0,0,0,0", "beyond the bound")):
+                  ("flow calibration --corrections 60,0,0,0,0,0,0,0,0,0", "beyond +50"),
+                  ("flow calibration --corrections -50.1,0,0,0,0,0,0,0,0,0", "beyond -50")):
     fake = FakeHighflow()
     out, err, code = do(fake, line)
     if code is None or fake.written:

@@ -129,16 +129,18 @@ from `68-display-chart1-1s-chart2-30s`.
 - For 0x02f and 0x030, other values of the coolant and connector lists are
   unknown.
 - The correction unit at 0x031 was not recorded; the stored value is the
-  entered value × 100. Values from −1 to +2 have been written.
+  entered value × 100. Aquasuite's range is −50 to +50: both ends were written
+  in `../usb-captures/11-highflow-flow-calibration-min-max`.
 - Both arrays are writable and fully confirmed: in
   `../usb-captures/10-highflow-flow-calibration` Aquasuite moved seven of the
   ten rates (30 → 31, 50 → 51, 100 → 99, 125 → 124, 150 → 149, 200 → 202,
   250 → 248 l/h) and every one of the ten corrections, one field per write.
   Each write touched only the two bytes of the value changed, so both strides
   hold across the whole array.
-- The rates rise in every capture. Aquasuite's own limits for them, and for
-  the corrections, were not captured, and neither was whether the table can
-  hold other than ten entries.
+- The rates rise in every capture. Aquasuite's own limits for the rates were
+  not captured, and neither was whether the table can hold other than ten
+  entries. The rates were back at their factory values by capture 11, so
+  something restores them; how was not captured either.
 
 Water quality is linear in conductivity:
 `(0% point − conductivity) / (0% point − 100% point)`. This was checked
