@@ -95,22 +95,22 @@ RGB_PARAM_NAMES = {
 }
 RGB_PARAM_NAMES[0x10] = RGB_PARAM_NAMES[0x11] = RGB_PARAM_NAMES[0x0F]
 # Colour gradient, from six USB captures of Aquasuite in ../usb-captures/ and
-# the owner's reading of its panel. The gradient runs from a start to an end
-# that the software does not let you move, with up to three stops in between,
-# and each stretch between two of them takes one colour:
+# the owner's reading of its panel, whose words these names follow. The
+# gradient runs from a start to an end that the software does not let you move,
+# with up to three "limits" in between, and each stretch between two of them
+# takes one colour:
 #   0  the start, 0 in every gradient captured on either device
 #   1  the end, 1000 in every one of them
-#   2  rotation speed, moved 19 -> 20 -> 0 in 15-...-rotation-speed
-#   3  the number of stops
-#   4-6  where each stop sits. 12-...-775-up-back-down moved the first, and it
-#      reads 775 in the software too, so a position is stored as shown;
-#      16-...-add-remove-limits names all three, 194-388-775. Unused positions
+#   2  "Rotation", the slider moved 19 -> 20 -> 0 in 15-...-rotation-speed
+#   3  how many limits there are ("Add limit" / "Remove limit")
+#   4-6  where each limit sits. 12-...-775-up-back-down moved the first, and it
+#      reads 775 in the software too, so a limit is stored as shown;
+#      16-...-add-remove-limits names all three, 194-388-775. Unused limits
 #      repeat the last one.
-# Parameters 7 and 8 are 0 in every gradient seen, which fits three stops being
-# the most the software offers.
-RGB_PARAM_NAMES[0x21] = ["start_position", "end_position", "rotation_speed",
-                         "stops", "stop1_position", "stop2_position",
-                         "stop3_position"]
+# Parameters 7 and 8 are 0 in every gradient seen, which fits three limits
+# being the most the software offers.
+RGB_PARAM_NAMES[0x21] = ["start", "end", "rotation",
+                         "limits", "limit1", "limit2", "limit3"]
 # Bitmasks in the flags byte at +5. fade on colour-change is directly confirmed;
 # the all-off captures confirm the others are absent, not their values.
 RGB_FLAG_NAMES = {
@@ -177,8 +177,8 @@ RGB_PALETTE_SPEC = {
     0x10: (True, 1, 1),       # snowfall
     0x11: (True, 1, 1),       # stardust
     # Colour gradient: 2 to 4 colours in entries 2-5, one more than the number
-    # of stops. 16-highflow-rgb-gradient-add-remove-limits walks 3, 2 and 1
-    # stops with 4, 3 and 2 colours; the Octo's three-stop gradient holds four.
+    # of limits. 16-highflow-rgb-gradient-add-remove-limits walks 3, 2 and 1
+    # limits with 4, 3 and 2 colours; the Octo's three-limit gradient holds four.
     0x21: (False, 2, 4),
 }
 # Effects absent from the table take no user-settable colours: the rainbow family
@@ -197,16 +197,16 @@ RGB_PALETTE_START = {0x21: 2}
 RGB_PALETTE_PAD = {0x21}
 # Effects that derive a parameter from the number of colours, other than the
 # plain 'count': {mode: (parameter, offset)}. A gradient of n colours has n-1
-# stops - the boundaries between them.
+# limits - the boundaries between them.
 
 # The 'count' parameter of a variable-length effect is the length of its colour
 # list, so the CLI derives it and never exposes it as a settable parameter.
 RGB_COUNT_PARAM = "count"
-RGB_DERIVED_COUNT = {0x21: ("stops", -1)}
+RGB_DERIVED_COUNT = {0x21: ("limits", -1)}
 # Parameters the official software shows but does not let you move, so aqdctl
 # does not write them either: the gradient runs from its start to its end, and
-# only the stops in between can be placed.
-RGB_PARAM_FIXED = {0x21: ("start_position", "end_position")}
+# only the limits in between can be placed.
+RGB_PARAM_FIXED = {0x21: ("start", "end")}
 
 # A controller slot as the device leaves it when nothing is configured: mode 0,
 # one LED, no data source, filters at 10/15, both mapping blocks neutral. Taken
@@ -634,7 +634,7 @@ def _apply_settings(dev, buf, after, base, args):
         if key in RGB_PARAM_FIXED.get(mode, ()):
             sys.exit("'%s' cannot be moved: the effect runs from its start to its "
                      "end, and\nthe official software does not let either move. Only "
-                     "the stops in between\ncan be placed." % key)
+                     "the limits in between\ncan be placed." % key)
         if mode in RGB_DERIVED_COUNT and key == RGB_DERIVED_COUNT[mode][0]:
             sys.exit("'%s' follows from the number of colours, so it comes from "
                      "--colour:\n%d colours make %d." % (key, 4, 4 + RGB_DERIVED_COUNT[mode][1]))
