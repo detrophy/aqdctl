@@ -40,6 +40,9 @@ RGB_MAPS = ((10, 12, 14, 15), (16, 18, 20, 21))
 RGB_PARAM = 22
 # The colour at +46 is HSV, not the Farbwerk 360's A/G/R/B palette: hue is a
 # BE16 over 0..1535 (six 256-step sectors), then saturation and value as bytes.
+# The official software's picker works in HSV as well, so what it shows as
+# RRGGBB is the lossy view: a colour typed here as RRGGBB can come out one step
+# off its saturation, without changing the colour the LEDs produce.
 RGB_COLOUR = 46        # 6 palette entries of 4 bytes
 RGB_PALETTE_ENTRIES = 6
 HUE_FULL = 1536
@@ -91,17 +94,17 @@ RGB_PARAM_NAMES = {
            "runtime", "interval_min", "interval_max"],
 }
 RGB_PARAM_NAMES[0x10] = RGB_PARAM_NAMES[0x11] = RGB_PARAM_NAMES[0x0F]
-# Colour gradient is only partly mapped, from four USB captures of Aquasuite in
-# ../usb-captures/ and the owner's reading of its sliders:
+# Colour gradient, from five USB captures of Aquasuite in ../usb-captures/ and
+# the owner's reading of its sliders:
 #   2  rotation speed, moved 19 -> 20 -> 0 in 15-...-rotation-speed
-#   3  the number of gradient stops
-#   4  the first stop's position, 777 -> 775 in 12-...-775-up-back-down, which
-#      reads 775 in the software too: the position is stored as shown
-# Parameters 5 and 6 are probably the second and third stop - they hold 500 and
-# 750 in the Octo's three-stop gradient, evenly spaced with the first at 250 -
-# but no capture has moved them, so they keep their index. So do 0 and 1, which
-# is 1000 in every gradient seen.
-RGB_PARAM_NAMES[0x21] = ["", "", "rotation_speed", "stops", "stop1_position"]
+#   3  the number of stops, the boundaries inside the gradient
+#   4-6  where each stop sits. 12-...-775-up-back-down moved the first, and it
+#      reads 775 in the software too, so a position is stored as shown;
+#      16-...-add-remove-limits names all three, 194-388-775. Unused positions
+#      repeat the last one.
+# Parameters 0 and 1 keep their index; 1 is 1000 in every gradient seen.
+RGB_PARAM_NAMES[0x21] = ["", "", "rotation_speed", "stops",
+                         "stop1_position", "stop2_position", "stop3_position"]
 # Bitmasks in the flags byte at +5. fade on colour-change is directly confirmed;
 # the all-off captures confirm the others are absent, not their values.
 RGB_FLAG_NAMES = {
@@ -162,17 +165,31 @@ RGB_PALETTE_SPEC = {
     0x0F: (True, 1, 1),       # rain
     0x10: (True, 1, 1),       # snowfall
     0x11: (True, 1, 1),       # stardust
+    # Colour gradient: 2 to 4 colours in entries 2-5, one more than the number
+    # of stops. 16-highflow-rgb-gradient-add-remove-limits walks 3, 2 and 1
+    # stops with 4, 3 and 2 colours; the Octo's three-stop gradient holds four.
+    0x21: (False, 2, 4),
 }
 # Effects absent from the table take no user-settable colours: the rainbow family
 # generates its own, and the audio/ambient ones are driven from the host. Colour
 # gradient is the exception - it clearly uses the palette (the Octo's three-stop
 # gradient holds red, green and blue in entries 2-4), but which entry belongs to
 # which stop has not been captured, so it is listed apart rather than guessed.
-RGB_PALETTE_UNMAPPED = {0x21}
+# Where an effect's colours start in the palette. Colour gradient keeps entries
+# 0 and 1 out of it: they read #000000 and #050505 in every gradient captured on
+# either device, and no capture has moved them.
+RGB_PALETTE_START = {0x21: 2}
+# Effects whose unused palette entries repeat the last colour instead of being
+# cleared, as the official software writes them.
+RGB_PALETTE_PAD = {0x21}
+# Effects that derive a parameter from the number of colours, other than the
+# plain 'count': {mode: (parameter, offset)}. A gradient of n colours has n-1
+# stops - the boundaries between them.
 
 # The 'count' parameter of a variable-length effect is the length of its colour
 # list, so the CLI derives it and never exposes it as a settable parameter.
 RGB_COUNT_PARAM = "count"
+RGB_DERIVED_COUNT = {0x21: ("stops", -1)}
 
 # A controller slot as the device leaves it when nothing is configured: mode 0,
 # one LED, no data source, filters at 10/15, both mapping blocks neutral. Taken
@@ -284,10 +301,9 @@ def palette_roles(mode):
     """Role of each palette entry, in order, for an effect. Derived from
     RGB_PALETTE_SPEC so it says the same thing as 'rgb effects' and as the
     validation in 'rgb create' and 'rgb set'."""
-    if mode in RGB_PALETTE_UNMAPPED:
-        return ["colour, role not mapped"] * RGB_PALETTE_ENTRIES
+    start = RGB_PALETTE_START.get(mode, 0)
     has_bg, _lo, hi = RGB_PALETTE_SPEC.get(mode, (False, 0, 0))
-    roles = ["background"] if has_bg else []
+    roles = ["not part of this effect"] * start + (["background"] if has_bg else [])
     # A single-colour effect just has "colour"; numbering one thing is noise.
     if hi == 1:
         return roles + ["colour"]
@@ -431,11 +447,20 @@ def describe_rgb(buf, layout, index, name, source_label):
                      buf[base + omin], buf[base + omax]))
 
     roles = palette_roles(mode)
+    # Where a count follows from the colours, the entries past it are copies the
+    # official software leaves behind, not colours in use.
+    used = None
+    if mode in RGB_DERIVED_COUNT:
+        key, offset = RGB_DERIVED_COUNT[mode]
+        used = get_param(buf, base, RGB_PARAM_NAMES[mode].index(key)) - offset
+    start = RGB_PALETTE_START.get(mode, 0)
     for e in range(RGB_PALETTE_ENTRIES):
         h, sat, val = read_entry(buf, layout, index, e)
         if not (h or sat or val):
             continue
         role = roles[e] if e < len(roles) else "stored, unused by this effect"
+        if used is not None and start <= e < RGB_PALETTE_ENTRIES and e - start >= used:
+            role += " (unused)"
         print("      %-12s #%02X%02X%02X" % (role + ":", *hsv_to_rgb(h, sat, val)))
 
 
@@ -528,10 +553,6 @@ def _apply_settings(dev, buf, after, base, args):
     if args.colour is not None or args.background is not None:
         has_bg, lo, hi = RGB_PALETTE_SPEC.get(mode, (False, 0, 0))
         effect = RGB_MODES.get(mode, "%#04x" % mode)
-        if mode in RGB_PALETTE_UNMAPPED:
-            sys.exit("Effect '%s' does use colours, but which palette entry is which "
-                     "has\nnot been captured, so aqdctl will not write them. Set them "
-                     "in the official\nsoftware." % effect)
         if hi == 0:
             sys.exit("Effect '%s' takes no colours of its own. "
                      "'rgb effects %s' explains what it does accept."
@@ -548,26 +569,33 @@ def _apply_settings(dev, buf, after, base, args):
                          % (effect, lo if lo == hi else "%d-%d" % (lo, hi),
                             "" if hi == 1 else "s", len(colours)))
 
-        entry = 0
+        entry = RGB_PALETTE_START.get(mode, 0)
         if has_bg:
             if args.background is not None:
                 rgb = parse_hex_colour(args.background)
-                _put_entry(after, base, 0, rgb)
+                _put_entry(after, base, entry, rgb)
                 print("  background: #%02X%02X%02X" % rgb)
-            entry = 1
+            entry += 1
         for n, rgb in enumerate(colours):
             _put_entry(after, base, entry + n, rgb)
             print("  colour %d: #%02X%02X%02X" % ((n + 1,) + rgb))
         if colours:
-            # Clear the entries past the list: the official software leaves stale
-            # colours behind, and showing them back would be a lie.
+            # Past the list: repeat the last colour where the official software
+            # does, otherwise clear the entries. Leaving stale colours behind
+            # would show them back as if they were set.
+            tail = base + RGB_COLOUR + 4 * (entry + len(colours) - 1)
+            fill = bytes(after[tail:tail + 4]) if mode in RGB_PALETTE_PAD else b"\0" * 4
             for e in range(entry + len(colours), RGB_PALETTE_ENTRIES):
                 o = base + RGB_COLOUR + 4 * e
-                after[o:o + 4] = b"\x00\x00\x00\x00"
-            # 'count' is the length of the list, never typed by hand.
+                after[o:o + 4] = fill
+            # A count that follows from the list is never typed by hand.
             names = RGB_PARAM_NAMES.get(mode, [])
             if RGB_COUNT_PARAM in names:
                 set_param(after, base, names.index(RGB_COUNT_PARAM), len(colours))
+            elif mode in RGB_DERIVED_COUNT:
+                key, offset = RGB_DERIVED_COUNT[mode]
+                set_param(after, base, names.index(key), len(colours) + offset)
+                print("  %s: %d" % (key, len(colours) + offset))
 
     labels = RGB_PARAM_NAMES.get(mode, [])
     for spec in (args.param or []):
@@ -580,6 +608,9 @@ def _apply_settings(dev, buf, after, base, args):
         if key == RGB_COUNT_PARAM:
             sys.exit("'count' is the number of colours, so it comes from --colour "
                      "and is not set by hand.")
+        if mode in RGB_DERIVED_COUNT and key == RGB_DERIVED_COUNT[mode][0]:
+            sys.exit("'%s' follows from the number of colours, so it comes from "
+                     "--colour:\n%d colours make %d." % (key, 4, 4 + RGB_DERIVED_COUNT[mode][1]))
         if key in labels:
             k = labels.index(key)
         else:
@@ -761,11 +792,7 @@ def cmd_rgb_effects(dev, args):
             print("  animation is streamed from an Aquasuite host DLL, so the LEDs")
             print("  sit at their background with nothing running.")
         has_bg, lo, hi = RGB_PALETTE_SPEC.get(mode, (False, 0, 0))
-        if mode in RGB_PALETTE_UNMAPPED:
-            print("  colours   : used by the effect, but which palette entry is")
-            print("              which has not been captured - set them in the")
-            print("              official software")
-        elif hi == 0:
+        if hi == 0:
             print("  colours   : none (the effect generates its own)")
         else:
             bits = []
@@ -775,7 +802,8 @@ def cmd_rgb_effects(dev, args):
                         % ",".join(["RRGGBB"] * lo)
                         + ("[,...up to %d]" % hi if hi > lo else ""))
             print("  colours   : %s" % "  ".join(bits))
-        names = [n for n in RGB_PARAM_NAMES.get(mode, []) if n and n != RGB_COUNT_PARAM]
+        derived = {RGB_COUNT_PARAM, RGB_DERIVED_COUNT.get(mode, ("",))[0]}
+        names = [n for n in RGB_PARAM_NAMES.get(mode, []) if n and n not in derived]
         print("  parameters: %s"
               % (", ".join("%s=N" % n for n in names) if names else "none"))
         flags = sorted(RGB_FLAG_NAMES.get(mode, {}))

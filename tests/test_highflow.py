@@ -1060,15 +1060,74 @@ with contextlib.redirect_stdout(out):
                        highflow.RGB, 1, "strip", highflow.source_label)
 text = out.getvalue()
 for want in ("stops=1", "stop1_position=775", "rotation_speed=", "reverse_direction",
-             "unknown bits 0x07", "role not mapped"):
+             "unknown bits 0x07", "colour 1:", "not part of this effect", "(unused)"):
     if want not in text:
         bad.append("'info rgb' on a gradient lacks %r:\n%s" % (want, text))
-fake = FakeHighflow()
-fake.blobs[core.CTRL_REPORT_ID] = bytearray(usb_writes(GRADIENT % "12-highflow-rgb-gradient-775-up-back-down")[0])
-out, err, code = do(fake, "rgb set controller 1 --colour FF0000")
-if code is None or "has not been captured" not in flat(code) or fake.written:
-    bad.append("a colour on an unmapped palette was accepted: %r" % code)
 check("colour gradient: the two captured flags and the stop count are named", bad)
+
+# ------------------ the gradient's stops and colours, from USB capture 16
+# 16-...-add-remove-limits walks 2, 3, 2 and 1 stops. Its colours live in
+# palette entries 2-5, one more than the number of stops, and the entries past
+# them repeat the last colour - so the matching command must reproduce each
+# write from the one before, byte for byte.
+bad = []
+w = usb_writes(GRADIENT % "16-highflow-rgb-gradient-add-remove-limits-194-388-775")
+base = highflow.RGB.slot_base(1)
+if len(w) != 4:
+    bad.append("capture 16: expected 4 writes, found %d" % len(w))
+else:
+    if [rgbpx.get_param(b, base, 3) for b in w] != [2, 3, 2, 1]:
+        bad.append("capture 16: the stop counts are not 2, 3, 2, 1")
+    for n, buf in enumerate(w, 1):
+        stops = rgbpx.get_param(buf, base, 3)
+        pal = [rgbpx.read_entry(buf, highflow.RGB, 1, e) for e in range(6)]
+        if any(e != pal[2 + stops] for e in pal[3 + stops:]):
+            bad.append("write %d: the entries past the %d colours do not repeat the last"
+                       % (n, stops + 1))
+        if [rgbpx.get_param(buf, base, k) for k in (4, 5, 6)][stops:] != \
+                [rgbpx.get_param(buf, base, 6)] * (3 - stops):
+            bad.append("write %d: the unused positions do not repeat the last" % n)
+    YELLOW, RED = "CEC028", "DD2227"
+    for source, target, argv in (
+            (w[0], w[1], "--colour %s,%s,%s,%s --param stop1_position=194 "
+                         "--param stop2_position=388" % (YELLOW, YELLOW, YELLOW, RED)),
+            (w[2], w[3], "--colour %s,%s --param stop1_position=775" % (YELLOW, RED))):
+        fake = FakeHighflow()
+        fake.blobs[core.CTRL_REPORT_ID] = bytearray(source)
+        out, err, code = do(fake, "rgb set controller 1 " + argv)
+        written = fake.blobs[core.CTRL_REPORT_ID]
+        # A colour given as RRGGBB can land one step off Aquasuite's saturation:
+        # its picker works in HSV, which is what the report stores, so the RRGGBB
+        # it displays is the lossy view. Everything else must match byte for byte,
+        # the checksum included once those bytes are accounted for.
+        soft = {highflow.RGB.slot_base(1) + rgbpx.RGB_COLOUR + 4 * e + 2 for e in range(6)}
+        diff = [i for i in range(682 - 2) if written[i] != target[i]]
+        off_by_one = [i for i in diff if i in soft and abs(written[i] - target[i]) <= 1]
+        if code is not None:
+            bad.append("capture 16: %r refused: %s" % (argv, code))
+        elif set(diff) - set(off_by_one):
+            bad.append("capture 16: %r differs from Aquasuite at %s"
+                       % (argv, ", ".join(hex(i) for i in set(diff) - set(off_by_one))))
+        elif not diff and bytes(written) != bytes(target):
+            bad.append("capture 16: %r left a stale checksum" % argv)
+    # the stop count follows from the colours and cannot be typed
+    for line, why in (("rgb set controller 1 --colour %s" % YELLOW, "one colour"),
+                      ("rgb set controller 1 --colour " + ",".join([YELLOW] * 5), "five"),
+                      ("rgb set controller 1 --param stops=2", "stops by hand")):
+        fake = FakeHighflow()
+        fake.blobs[core.CTRL_REPORT_ID] = bytearray(w[0])
+        out, err, code = do(fake, line)
+        if code is None or fake.written:
+            bad.append("%s was accepted (%s)" % (line, why))
+    # 'rgb effects' describes it from the same tables
+    out, err, code = do(FakeHighflow(), "rgb effects colour_gradient")
+    for want in ("--colour RRGGBB,RRGGBB[,...up to 4]", "rotation_speed",
+                 "stop1_position", "reverse_rotation"):
+        if want not in out:
+            bad.append("'rgb effects colour_gradient' lacks %r:\n%s" % (want, out))
+    if "stops" in out.split("parameters")[1].split("flags")[0]:
+        bad.append("'rgb effects' offers 'stops' as a parameter to set")
+check("colour gradient: stops, positions and the palette reproduce capture 16", bad)
 
 print("\n%d/%d passed" % (checks - len(failures), checks))
 sys.exit(1 if failures else 0)
