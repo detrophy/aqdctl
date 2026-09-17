@@ -1031,13 +1031,35 @@ else:
     if rgbpx.RGB_PARAM_NAMES[0x21][4] != "stop1_position":
         bad.append("capture 12: the first stop position is not named")
 
+# 15-...-rotation-speed moves parameter 2 alone, twice
+w = usb_writes(GRADIENT % "15-highflow-rgb-gradient-rotation-speed")
+if len(w) != 3:
+    bad.append("capture 15: expected 3 writes, found %d" % len(w))
+else:
+    base = highflow.RGB.slot_base(1)
+    speeds = [rgbpx.get_param(b, base, 2) for b in w]
+    moved = {k for a, b in zip(w, w[1:]) for k in range(9)
+             if rgbpx.get_param(a, base, k) != rgbpx.get_param(b, base, k)}
+    if speeds != [19, 20, 0] or moved != {2}:
+        bad.append("capture 15: parameter 2 reads %s, parameters %s moved"
+                   % (speeds, sorted(moved)))
+    if rgbpx.RGB_PARAM_NAMES[0x21][2] != "rotation_speed":
+        bad.append("capture 15: parameter 2 is not named")
+    for source, target, value in ((w[0], w[1], 20), (w[1], w[2], 0)):
+        fake = FakeHighflow()
+        fake.blobs[core.CTRL_REPORT_ID] = bytearray(source)
+        out, err, code = do(fake, "rgb set controller 1 --param rotation_speed=%d" % value)
+        if code is not None or bytes(fake.blobs[core.CTRL_REPORT_ID]) != bytes(target):
+            bad.append("capture 15: rotation_speed=%d does not reproduce the capture: %s"
+                       % (value, code))
+
 # what is named shows up, what is not stays raw and unwritable
 out = io.StringIO()
 with contextlib.redirect_stdout(out):
     rgbpx.describe_rgb(usb_writes(GRADIENT % "13-highflow-rgb-gradient-reverse-direction-on-then-off")[0],
                        highflow.RGB, 1, "strip", highflow.source_label)
 text = out.getvalue()
-for want in ("stops=1", "stop1_position=775", "reverse_direction",
+for want in ("stops=1", "stop1_position=775", "rotation_speed=", "reverse_direction",
              "unknown bits 0x07", "role not mapped"):
     if want not in text:
         bad.append("'info rgb' on a gradient lacks %r:\n%s" % (want, text))

@@ -91,16 +91,17 @@ RGB_PARAM_NAMES = {
            "runtime", "interval_min", "interval_max"],
 }
 RGB_PARAM_NAMES[0x10] = RGB_PARAM_NAMES[0x11] = RGB_PARAM_NAMES[0x0F]
-# Colour gradient is only partly mapped. Parameter 3 is the number of gradient
-# stops and parameter 4 the position of the first one, both confirmed by the
-# owner against Aquasuite: the value moved in
-# ../usb-captures/12-highflow-rgb-gradient-775-up-back-down reads 775 in the
-# software too, so the position is stored as shown.
+# Colour gradient is only partly mapped, from four USB captures of Aquasuite in
+# ../usb-captures/ and the owner's reading of its sliders:
+#   2  rotation speed, moved 19 -> 20 -> 0 in 15-...-rotation-speed
+#   3  the number of gradient stops
+#   4  the first stop's position, 777 -> 775 in 12-...-775-up-back-down, which
+#      reads 775 in the software too: the position is stored as shown
 # Parameters 5 and 6 are probably the second and third stop - they hold 500 and
 # 750 in the Octo's three-stop gradient, evenly spaced with the first at 250 -
-# but no capture has moved them, so they keep their index. So do 0, 1 (1000 in
-# every gradient seen) and 2.
-RGB_PARAM_NAMES[0x21] = ["", "", "", "stops", "stop1_position"]
+# but no capture has moved them, so they keep their index. So do 0 and 1, which
+# is 1000 in every gradient seen.
+RGB_PARAM_NAMES[0x21] = ["", "", "rotation_speed", "stops", "stop1_position"]
 # Bitmasks in the flags byte at +5. fade on colour-change is directly confirmed;
 # the all-off captures confirm the others are absent, not their values.
 RGB_FLAG_NAMES = {
