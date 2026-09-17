@@ -91,13 +91,16 @@ RGB_PARAM_NAMES = {
            "runtime", "interval_min", "interval_max"],
 }
 RGB_PARAM_NAMES[0x10] = RGB_PARAM_NAMES[0x11] = RGB_PARAM_NAMES[0x0F]
-# Colour gradient is only partly mapped. The owner confirmed parameter 3 is the
-# number of gradient stops, which matches the captures: three on the Octo
-# (octo/12-rgb-effect-catalogue-4, stops at 250, 500 and 750) and one on the
-# high flow NEXT. The rest keep their index in the output rather than a guessed
-# name - in particular parameter 4, the value moved in
-# ../usb-captures/12-highflow-rgb-gradient-775-up-back-down.
-RGB_PARAM_NAMES[0x21] = ["", "", "", "stops"]
+# Colour gradient is only partly mapped. Parameter 3 is the number of gradient
+# stops and parameter 4 the position of the first one, both confirmed by the
+# owner against Aquasuite: the value moved in
+# ../usb-captures/12-highflow-rgb-gradient-775-up-back-down reads 775 in the
+# software too, so the position is stored as shown.
+# Parameters 5 and 6 are probably the second and third stop - they hold 500 and
+# 750 in the Octo's three-stop gradient, evenly spaced with the first at 250 -
+# but no capture has moved them, so they keep their index. So do 0, 1 (1000 in
+# every gradient seen) and 2.
+RGB_PARAM_NAMES[0x21] = ["", "", "", "stops", "stop1_position"]
 # Bitmasks in the flags byte at +5. fade on colour-change is directly confirmed;
 # the all-off captures confirm the others are absent, not their values.
 RGB_FLAG_NAMES = {

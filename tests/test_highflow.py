@@ -1018,12 +1018,18 @@ else:
         bad.append("capture 12: parameters %s moved, expected only 4 (777 -> 775)" % moved)
     fake = FakeHighflow()
     fake.blobs[core.CTRL_REPORT_ID] = bytearray(w[1])
-    out, err, code = do(fake, "rgb set controller 1 --param 4=777")
-    if code is not None or bytes(fake.blobs[core.CTRL_REPORT_ID]) != bytes(w[0]):
-        bad.append("capture 12: setting parameter 4 does not reproduce the capture: %s" % code)
-    # parameter 3 is the number of stops, which the owner confirmed
+    # by name and by index, both reproducing Aquasuite's write
+    for argv in ("--param stop1_position=777", "--param 4=777"):
+        fake = FakeHighflow()
+        fake.blobs[core.CTRL_REPORT_ID] = bytearray(w[1])
+        out, err, code = do(fake, "rgb set controller 1 " + argv)
+        if code is not None or bytes(fake.blobs[core.CTRL_REPORT_ID]) != bytes(w[0]):
+            bad.append("capture 12: %r does not reproduce the capture: %s" % (argv, code))
+    # the two parameters the owner confirmed against Aquasuite
     if rgbpx.RGB_PARAM_NAMES[0x21][3] != "stops" or rgbpx.get_param(w[0], base, 3) != 1:
         bad.append("capture 12: the stop count is not where the table says")
+    if rgbpx.RGB_PARAM_NAMES[0x21][4] != "stop1_position":
+        bad.append("capture 12: the first stop position is not named")
 
 # what is named shows up, what is not stays raw and unwritable
 out = io.StringIO()
@@ -1031,7 +1037,8 @@ with contextlib.redirect_stdout(out):
     rgbpx.describe_rgb(usb_writes(GRADIENT % "13-highflow-rgb-gradient-reverse-direction-on-then-off")[0],
                        highflow.RGB, 1, "strip", highflow.source_label)
 text = out.getvalue()
-for want in ("stops=1", "reverse_direction", "unknown bits 0x07", "role not mapped"):
+for want in ("stops=1", "stop1_position=775", "reverse_direction",
+             "unknown bits 0x07", "role not mapped"):
     if want not in text:
         bad.append("'info rgb' on a gradient lacks %r:\n%s" % (want, text))
 fake = FakeHighflow()
