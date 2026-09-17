@@ -185,10 +185,12 @@ RGB_PALETTE_SPEC = {
 # generates its own, and the audio/ambient ones are driven from the host.
 
 # Where an effect's colours start in the palette. Colour gradient keeps entries
-# 0 and 1 out of it: they hold #000000 and #050505 in every gradient captured on
-# either device, which the owner identifies as the background colours the
-# Aquasuite writes by default. Its gradient panel has no background
-# control, so the effect does not use them.
+# 0 and 1 out of its own list: they hold #000000 and #050505 in every gradient
+# captured on either device, the background colours Aquasuite writes by default
+# per the owner, and its gradient panel has no control for them. The firmware
+# does use them, though: on reconnecting the high flow NEXT to the Linux host
+# the owner watched its LEDs fade in through exactly those two colours before
+# the gradient appeared. So aqdctl reads them and leaves them alone.
 RGB_PALETTE_START = {0x21: 2}
 # Effects whose unused palette entries repeat the last colour instead of being
 # cleared, as Aquasuite writes them.
@@ -318,7 +320,7 @@ def palette_roles(mode):
     validation in 'rgb create' and 'rgb set'."""
     start = RGB_PALETTE_START.get(mode, 0)
     has_bg, _lo, hi = RGB_PALETTE_SPEC.get(mode, (False, 0, 0))
-    roles = ["background default, unused"] * start + (["background"] if has_bg else [])
+    roles = ["background default"] * start + (["background"] if has_bg else [])
     # A single-colour effect just has "colour"; numbering one thing is noise.
     if hi == 1:
         return roles + ["colour"]

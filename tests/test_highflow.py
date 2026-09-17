@@ -1060,7 +1060,7 @@ with contextlib.redirect_stdout(out):
                        highflow.RGB, 1, "strip", highflow.source_label)
 text = out.getvalue()
 for want in ("limits=1", "limit1=775", "rotation=", "reverse_direction",
-             "colour 1:", "background default, unused", "(unused)"):
+             "colour 1:", "background default", "(unused)"):
     if want not in text:
         bad.append("'info rgb' on a gradient lacks %r:\n%s" % (want, text))
 if "unknown bits" in text:

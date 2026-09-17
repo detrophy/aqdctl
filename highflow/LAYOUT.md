@@ -171,6 +171,13 @@ against live values: predicted 85.48 %, device 85.49 %.
   external strip, and the only active controller is on port 0.
 - Brightness and the on/off byte sit 3 and 1 bytes before the controller
   block, the same as on the Octo.
+- On reconnecting the device, its LEDs fade in through the two colours in
+  palette entries 0 and 1 of the controller - #000000 and #050505 in this
+  configuration, which are Aquasuite's default background colours - before the
+  effect itself appears. Seen once by the owner, when the device returned from
+  a Windows KVM to the Linux host; not captured. So a controller's first two
+  palette entries are not spare: the firmware reads them even where the
+  effect's own colours start at entry 2.
 
 ### System
 
