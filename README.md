@@ -42,7 +42,7 @@ far only checked against the captures.
 ## Getting started
 
 ```
-git clone <repository URL>
+git clone https://github.com/detrophy/aqdctl.git
 cd aqdctl
 sudo python3 aqdctl.py info
 ```
