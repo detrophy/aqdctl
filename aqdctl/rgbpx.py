@@ -187,10 +187,11 @@ RGB_PALETTE_SPEC = {
 # Where an effect's colours start in the palette. Colour gradient keeps entries
 # 0 and 1 out of its own list: they hold #000000 and #050505 in every gradient
 # captured on either device, the background colours Aquasuite writes by default
-# per the owner, and its gradient panel has no control for them. The firmware
-# does use them, though: on reconnecting the high flow NEXT to the Linux host
-# the owner watched its LEDs fade in through exactly those two colours before
-# the gradient appeared. So aqdctl reads them and leaves them alone.
+# per the owner, and its gradient panel has no control for them. No other
+# effect carries that pair: each keeps its background in entry 0, or its first
+# colour where it has no background. Whether the firmware reads the two is not
+# known - see LAYOUT.md on the fade at startup - so aqdctl reads them and
+# leaves them alone.
 RGB_PALETTE_START = {0x21: 2}
 # Effects whose unused palette entries repeat the last colour instead of being
 # cleared, as Aquasuite writes them.

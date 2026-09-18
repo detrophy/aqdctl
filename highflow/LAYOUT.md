@@ -171,13 +171,18 @@ against live values: predicted 85.48 %, device 85.49 %.
   external strip, and the only active controller is on port 0.
 - Brightness and the on/off byte sit 3 and 1 bytes before the controller
   block, the same as on the Octo.
-- On reconnecting the device, its LEDs fade in through the two colours in
-  palette entries 0 and 1 of the controller - #000000 and #050505 in this
-  configuration, which are Aquasuite's default background colours - before the
-  effect itself appears. Seen once by the owner, when the device returned from
-  a Windows KVM to the Linux host; not captured. So a controller's first two
-  palette entries are not spare: the firmware reads them even where the
-  effect's own colours start at entry 2.
+- The LEDs fade in at startup. Seen once by the owner, when the device
+  returned from a Windows KVM to the Linux host: the strip came up through
+  black and a near-black grey before the colour gradient appeared, matching
+  the #000000 and #050505 held in that controller's palette entries 0 and 1.
+  A fade from off passes through those shades whatever the palette holds, so
+  the sighting does not show the firmware reading those entries. Only the
+  colour gradient carries that pair anyway; every other effect keeps its
+  background, or its first colour, in entry 0. What would separate the two:
+  put a saturated colour in entry 0 of a controller - aqdctl will not write
+  one there for a gradient, but any effect with a background has one - and
+  watch the next startup. A fade through that colour means the firmware reads
+  the entry; a fade through black means it is only a brightness ramp.
 
 ### System
 
