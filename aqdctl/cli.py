@@ -30,7 +30,7 @@ Supported: {supported}.
   aqdctl --device SERIAL info     its settings and live readings
 
 --device comes first, and every command other than the device list needs it.
-The serial is the one Aquasuite shows, e.g. 07417-13891. It is the only way of
+The serial is the one Aquasuite shows, e.g. 12345-67890. It is the only way of
 telling two devices of the same kind apart that survives a reboot, and a
 command never changes more than one device.""".format(supported=_supported())
 
@@ -55,7 +55,7 @@ def _take_device(argv):
     head = argv[0]
     if head == "--device":
         if len(argv) < 2:
-            sys.exit("--device needs a serial, e.g. --device 07417-13891. "
+            sys.exit("--device needs a serial, e.g. --device 12345-67890. "
                      "'aqdctl info' lists them.")
         return argv[1], argv[2:]
     if head.startswith("--device="):

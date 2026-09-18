@@ -1,7 +1,7 @@
 """Which supported devices are attached, told apart by serial.
 
 The serial is the USB serial number, which on Aquacomputer devices is the same
-serial Aquasuite shows (e.g. 07417-13891). It is readable without root, from
+serial Aquasuite shows (e.g. 12345-67890). It is readable without root, from
 the USB descriptor, and it is the only identifier that does not move: hidraw
 and hwmon numbers change between boots, and even between two runs."""
 

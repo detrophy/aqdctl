@@ -384,7 +384,7 @@ check("backup names carry type and serial; an Octo report is refused", bad)
 
 # ------------------------------------------------------ the command line
 bad = []
-HFN, OCTO = "07417-13891", "10989-29223"
+HFN, OCTO = SERIAL, "09876-54321"
 both = [discovery.Found(octo, OCTO, b"/nonexistent/o"),
         discovery.Found(highflow, HFN, b"/nonexistent/h")]
 real_attached, real_device = discovery.attached, core.Device
