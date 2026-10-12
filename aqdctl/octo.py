@@ -12,7 +12,7 @@ import functools
 import struct
 import sys
 
-from . import batch, core, keys, names, rgbpx
+from . import batch, core, keys, names, rgbpx, serve
 from .core import (be16, sbe16, put_be16, reseal, pct, to_raw_pct, require_pct,
                    require_window, commit)
 
@@ -1038,6 +1038,7 @@ def build_parser(prefix):
     # ----------------------------------------------- backup, restore, alias
     keys.register(sub, prefix)
     batch.register(sub, prefix)
+    serve.register(sub, prefix)
     core.add_backup_restore(sub, sys.modules[__name__])
     core.add_alias(sub, prefix)
     return ap

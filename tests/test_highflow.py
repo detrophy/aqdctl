@@ -55,7 +55,7 @@ class FakeHighflow:
     def __init__(self, stem="01-baseline", live=LIVE[0]):
         self.blobs = {core.CTRL_REPORT_ID: capture(stem),
                       core.LABEL_REPORT_ID: capture(stem, core.LABEL_REPORT_ID)}
-        self.live, self.written, self.commands = live, [], []
+        self.live, self.written, self.commands, self.saves = live, [], [], 0
 
     def __enter__(self): return self
     def __exit__(self, *exc): pass
@@ -66,9 +66,12 @@ class FakeHighflow:
         return buf
     def read_input(self, size, timeout_ms=0):
         return self.live() if callable(self.live) else self.live
-    def write(self, buf):
+    def write(self, buf, save=True):
         self.written.append(bytes(buf))
         self.blobs[buf[0]] = bytearray(buf)
+        if save and buf[0] == core.CTRL_REPORT_ID:
+            self.saves += 1
+    def save(self): self.saves += 1
     def command(self, code): self.commands.append(code)
 
 
@@ -1950,6 +1953,121 @@ second = core.backup(capture(BY_NUMBER[8]), FakeHighflow())
 if first == second or open(first, "rb").read() != bytes(capture("01-baseline")):
     bad.append("%s, %s" % (first, second))
 check("backups: a second backup in the same second does not overwrite the first", bad)
+
+# ------------------------------------------------------------------ serve
+# Requests and answers as JSON lines; writes take effect at once, the save
+# follows 3.8 s after the last of them, as Aquasuite does.
+import threading
+from aqdctl import serve
+
+
+class Clock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+
+def ask(session, request):
+    return session.handle(json.dumps(request))
+
+
+bad = []
+fake, clock = FakeHighflow(), Clock()
+session = serve.Session(fake, clock)
+backups = len(os.listdir(BACKUPS))
+answer = ask(session, {"id": 1, "op": "apply", "lines": ["display.brightness=high"]})
+if answer != {"id": 1, "ok": True, "written": True,
+              "changes": [{"key": "display.brightness", "old": "low", "new": "high"}]}:
+    bad.append("apply: %r" % answer)
+if (len(fake.written), fake.saves) != (1, 0) or \
+        abs(session.due_in() - core.SAVE_DELAY) > 1e-9:
+    bad.append("after a write: %d writes, %d saves, due in %r"
+               % (len(fake.written), fake.saves, session.due_in()))
+clock.now += 3.7
+session.tick()
+ask(session, {"op": "apply", "lines": ["display.brightness=medium"]})
+clock.now += 3.7
+session.tick()
+if fake.saves:
+    bad.append("saved before 3.8 s without a write")
+clock.now += 0.1
+session.tick()
+if (len(fake.written), fake.saves, session.due_in()) != (2, 1, None):
+    bad.append("two writes: %d writes, %d saves" % (len(fake.written), fake.saves))
+if len(os.listdir(BACKUPS)) - backups != 1:
+    bad.append("%d backups for two writes in one session" % (len(os.listdir(BACKUPS)) - backups))
+answer = ask(session, {"op": "apply", "lines": ["name.sensor.internal=Loop In"]})
+if not answer["written"] or session.due_in() is not None:
+    bad.append("a name write scheduled a save: %r" % answer)
+check("serve: each write at once, one save 3.8 s after the last, one backup per session", bad)
+
+bad = []
+session = serve.Session(FakeHighflow())
+with contextlib.redirect_stderr(io.StringIO()):     # the USB warning
+    for request, status, words in (
+            ("nope", core.EXIT_USAGE, "one JSON object"),
+            ({"op": "fly"}, core.EXIT_USAGE, "Unknown op"),
+            ({"op": "get", "keys": ["nosuch"]}, core.EXIT_INVALID, "No key"),
+            ({"op": "get", "keys": "live"}, core.EXIT_USAGE, "list of key prefixes"),
+            ({"op": "apply", "lines": ["display.brightness=dim"]}, core.EXIT_USAGE, "line 1"),
+            ({"op": "apply", "lines": ["system.usb-current=1000"]}, core.EXIT_REFUSED, "--force")):
+        answer = session.handle(request if isinstance(request, str) else json.dumps(request))
+        if answer["ok"] or answer["error"]["status"] != status or \
+                words not in answer["error"]["message"]:
+            bad.append("%r: %r" % (request, answer))
+    fake = FakeHighflow()
+    session = serve.Session(fake)
+    answer = ask(session, {"op": "apply", "lines": ["system.usb-current=1000"], "force": True})
+    if not answer.get("written") or len(fake.written) != 1:
+        bad.append("force: %r" % answer)
+answer = ask(session, {"op": "apply", "lines": ["display.rotate=on"], "dry_run": True})
+if answer.get("written") is not False or len(fake.written) != 1:
+    bad.append("dry run: %r" % answer)
+answer = ask(session, {"id": "x", "op": "get", "keys": ["display.pages", "live.external"]})
+if answer != {"id": "x", "ok": True, "values": {"display.pages": [2, 3],
+                                                 "live.external": None}}:
+    bad.append("get: %r" % answer)
+answer = ask(session, {"op": "schema", "keys": ["display.brightness"]})
+if answer.get("keys") != [{"key": "display.brightness", "type": "choice", "settable": True,
+                           "choices": ["high", "medium", "low"]}]:
+    bad.append("schema: %r" % answer)
+check("serve: errors as {status, message}, force, dry run, get and schema", bad)
+
+# through a pipe: two requests in one read, the save at the end of input or
+# on close
+bad = []
+for requests, closes, answers_wanted in (
+        ([{"id": 1, "op": "get", "keys": ["display.brightness"]},
+          {"id": 2, "op": "apply", "lines": ["display.rotate=on"]}], True, 2),
+        ([{"id": 1, "op": "apply", "lines": ["display.rotate=on"]},
+          {"id": 2, "op": "close"}], False, 2)):
+    fake = FakeHighflow()
+    r, w = os.pipe()
+    os.write(w, "".join(json.dumps(q) + "\n" for q in requests).encode())
+    if closes:
+        os.close(w)
+    out = io.StringIO()
+    # in a thread, so a serve that waits for input it already has fails the
+    # check instead of hanging the suite
+    worker = threading.Thread(target=serve.run, args=(serve.Session(fake), r, out),
+                              daemon=True)
+    with contextlib.redirect_stdout(io.StringIO()):
+        worker.start()
+        worker.join(10)
+    if worker.is_alive():
+        bad.append("still waiting after 10 s with every request read")
+        continue
+    os.close(r)
+    if not closes:
+        os.close(w)
+    answers = [json.loads(line) for line in out.getvalue().splitlines()]
+    if [a.get("id") for a in answers] != list(range(1, answers_wanted + 1)) or \
+            not all(a["ok"] for a in answers) or (len(fake.written), fake.saves) != (1, 1):
+        bad.append("%s: %r, %d writes, %d saves" % ("end of input" if closes else "close",
+                                                   answers, len(fake.written), fake.saves))
+check("serve: requests read as they arrive; the pending save at close or end of input", bad)
 
 # Every write above backed up into BACKUPS, never the real data directory.
 core.data_dir = real_data_dir

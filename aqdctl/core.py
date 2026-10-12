@@ -198,6 +198,9 @@ def command_frame(code):
 # changed offset shows up in the live readings before 0x02 arrives. So it is
 # presumably the save to flash, which Aquasuite delays until changes stop.
 SECONDARY_CTRL_REPORT = command_frame(0x02)
+# Seconds after the last of a run of settings writes that Aquasuite sends the
+# save command: 3.62-3.84 s in every capture, each write restarting the wait.
+SAVE_DELAY = 3.8
 
 
 # ------------------------------------------------------------------- paths
@@ -457,10 +460,11 @@ class Device:
             check_layout(self.kind, buf)
         return bytearray(buf)
 
-    def write(self, buf):
+    def write(self, buf, save=True):
         """Send a resealed report. After a settings report, also send the
-        command Aquasuite sends after every settings change; after a name
-        report it sends nothing, and neither does this."""
+        save command, unless `save` is False and the caller sends it later
+        with save(), as Aquasuite does once changes stop. After a name report
+        Aquasuite sends nothing, and neither does this."""
         stored, computed = report_crc(buf)
         if stored != computed:
             sys.exit("Refusing to send a report with a stale checksum (internal error).")
@@ -468,8 +472,13 @@ class Device:
         if self.dev.send_feature_report(bytes(buf)) < 0:
             fail(EXIT_DEVICE, "send_feature_report failed.")
         self._last_op = time.monotonic()
-        if buf[0] != CTRL_REPORT_ID:
-            return
+        if buf[0] == CTRL_REPORT_ID and save:
+            self.save()
+
+    def save(self):
+        """Command 0x02, which Aquasuite sends 3.6-3.8 s after the last of a
+        run of settings writes. The write takes effect without it; it is
+        presumably the save to flash."""
         # An output report, as declared and as Aquasuite sends it. The HID
         # interface has no interrupt OUT endpoint, so hidraw delivers this as a
         # SET_REPORT(output) control transfer - what the capture shows. The
@@ -616,13 +625,22 @@ def commit(dev, before, after, args):
                   "reboot and will show up in Aquasuite." % dev.kind.TITLE)
         if not confirm("Proceed?", notice):
             fail(EXIT_NOT_CONFIRMED, "Aborted.")
-    dev.write(after)
-    verify = dev.read(before[0])
+    store(dev, after)
+    print("Written and verified.")
+
+
+def store(dev, after, save=True):
+    """Write a report and read it back. Without `save`, the save command is
+    left to the caller."""
+    if save:
+        dev.write(after)
+    else:
+        dev.write(after, save=False)
+    verify = dev.read(after[0])
     if diff(verify, after):
         fail(EXIT_DIFFERS, "Written, but the device reads back other values:\n%s\n"
              "The firmware may have rejected or adjusted some of them."
              % "\n".join(diff_lines(after, verify)))
-    print("Written and verified.")
 
 
 def cmd_backup(dev, args):

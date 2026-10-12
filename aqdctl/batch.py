@@ -418,9 +418,10 @@ def _unknown(kind, dev, staged, current, line):
     core.fail(core.EXIT_INVALID, "line %d: %s %s." % (line.number, line.key, why))
 
 
-def write(dev, plan, args):
+def write(dev, plan, args, writer=None):
     """Write each changed report once, after one confirmation, then the
-    protected channels."""
+    protected channels. `writer(before, after)` replaces the usual backup,
+    write, save and read-back for each report."""
     if not args.yes:
         notice = ("These writes go into the %s's persistent memory - they survive a\n"
                   "reboot and will show up in Aquasuite." % dev.kind.TITLE)
@@ -428,6 +429,9 @@ def write(dev, plan, args):
             core.fail(core.EXIT_NOT_CONFIRMED, "Aborted.")
     staged = plan.staged
     for rid in staged.changed():
+        if writer:
+            writer(bytearray(staged.original[rid]), staged.reports[rid])
+            continue
         target = args.backup
         if target and rid != core.CTRL_REPORT_ID:
             stem, dot, ext = target.rpartition(".")

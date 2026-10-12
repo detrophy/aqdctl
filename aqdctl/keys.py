@@ -12,6 +12,10 @@ import json
 
 from . import core
 
+# The version of the key names. It goes up when a key is renamed or removed,
+# or its value written differently; new keys leave it alone.
+API_VERSION = 1
+
 # Where a key's value comes from. Only the sources a request needs are read.
 IDENTITY = "identity"       # what discovery already knows: serial and type
 SETTINGS = "settings"       # feature report 0x03
@@ -202,12 +206,26 @@ def _constraint(key):
     return ",".join(words) or "-"
 
 
+def values(dev, prefixes=(), opened=False):
+    """[(key, value)] for the keys `prefixes` select on `dev`. Unless `opened`,
+    the device is opened only if a selected key needs it."""
+    with Context(dev.kind, dev.serial, dev, opened=opened) as ctx:
+        rows = read(dev.kind.key_table(), ctx, prefixes)
+    _require_matches(dev, prefixes, [k.name for k, _v in rows], _under)
+    return rows
+
+
+def described(dev, prefixes=()):
+    """The keys `prefixes` select, for their schema; families by template."""
+    listed = schema(dev.kind.key_table(), prefixes)
+    _require_matches(dev, prefixes, [k.name for k in listed], matches)
+    return listed
+
+
 def cmd_get(dev, args):
-    table = dev.kind.key_table()
     prefixes = args.prefix
     if args.keys:
-        listed = schema(table, prefixes)
-        _require_matches(dev, prefixes, [k.name for k in listed], matches)
+        listed = described(dev, prefixes)
         if args.json:
             print(json.dumps([k.schema() for k in listed], indent=2, ensure_ascii=False))
             return
@@ -217,9 +235,7 @@ def cmd_get(dev, args):
                   % (width, k.name, k.type, k.unit or "-", "rw" if k.settable else "ro",
                      _constraint(k)))
         return
-    with Context(dev.kind, dev.serial, dev, opened=False) as ctx:
-        rows = read(table, ctx, prefixes)
-    _require_matches(dev, prefixes, [k.name for k, _v in rows], _under)
+    rows = values(dev, prefixes)
     if args.json:
         if args.value:
             out = [k.json(v) for k, v in rows]
