@@ -144,15 +144,7 @@ def _main(argv):
         getattr(args, "_helper", ap).print_help()
         return
 
-    for field, limit in (("percent", 100.0), ("min", 100.0), ("max", 100.0)):
-        value = getattr(args, field, None)
-        if value is not None and not 0.0 <= value <= limit:
-            sys.exit("%s must be between 0 and %g." % (field, limit))
-    core.require_window(getattr(args, "min", None), getattr(args, "max", None),
-                        getattr(args, "channel", None))
-    if getattr(args, "guarded", False):
-        core.guard_channel(serial, getattr(args, "channel", None),
-                           getattr(args, "force", False))
+    core.check_args(args, serial)
 
     dev = core.Device(found.kind, found.path, serial)
     # --quiet: nothing on stdout. Errors and the confirmation go to stderr.

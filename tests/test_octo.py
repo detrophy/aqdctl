@@ -1431,6 +1431,134 @@ if out.getvalue() != want:
     bad.append("got:\n" + out.getvalue())
 outcome("get: live readings and protected channels without opening the device", bad)
 
-total = len(CASES) + 46
+# ------------------------------------------------------------------ batch
+from aqdctl import batch
+
+
+def octo_values(fake):
+    ctx = keys.Context(octo, SERIAL, fake)
+    return {k.name: k.text(k.read(ctx)) for k in keys.select(octo.key_table(), ctx)
+            if k.settable and k.source != keys.CONFIG}
+
+
+def octo_batch(text, ctrl=None, force=False):
+    """(the failure, or None; the fake) after a batch on the Octo fixture."""
+    fake = FakeOcto(ctrl)
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "batch.txt")
+        with open(path, "w") as fh:
+            fh.write(text)
+        args = argparse.Namespace(file=path, json=False, dry_run=False, yes=True,
+                                  verbose=False, quiet=False, force=force,
+                                  backup=os.path.join(tmp, "b.bin"), typed=["batch", path])
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                batch.cmd_batch(fake, args)
+            return None, fake
+        except SystemExit as exc:
+            return exc, fake
+
+
+bad = []
+before = octo_values(FakeOcto())
+real_config = core.config_path
+with tempfile.TemporaryDirectory() as tmp:
+    core.config_path = lambda: os.path.join(tmp, "config.json")
+    try:
+        # a setting of another mode lands without leaving the current mode
+        exc, fake = octo_batch("fan.1.target.temperature=40\n")
+        after = octo_values(fake)
+        if exc or len(fake.written) != 1 or after["fan.1.mode"] != "fixed" or \
+                after["fan.1.target.temperature"] != "40.00" or \
+                after["fan.1.fixed.power"] != before["fan.1.fixed.power"]:
+            bad.append("target temperature on a fixed channel: %s %s"
+                       % (exc, {k: after[k] for k in after if k.startswith("fan.1.")}))
+        exc, fake = octo_batch("fan.3.mode=curve\nfan.3.curve.startup=30\n")
+        after = octo_values(fake)
+        if exc or (after["fan.3.mode"], after["fan.3.curve.startup"]) != ("curve", "30.00"):
+            bad.append("into curve mode: %s" % exc)
+        exc, fake = octo_batch("fan.1.mode=follow\n")
+        if not exc or exc.code != core.EXIT_INVALID or "fan.1.follow" not in str(exc):
+            bad.append("follow without a channel: %r" % exc)
+        exc, fake = octo_batch("fan.2.mode=fixed\nfan.2.fixed.power=50\nfan.2.follow=\n")
+        after = octo_values(fake)
+        if exc or (after["fan.2.mode"], after["fan.2.fixed.power"], after["fan.2.follow"]) \
+                != ("fixed", "50.00", ""):
+            bad.append("from follow to fixed: %s" % exc)
+        # protected channels: a change is refused, an unchanged value is not one
+        core.set_protected(SERIAL, {1})
+        exc, fake = octo_batch("fan.1.limits.max=60\n")
+        if not exc or exc.code != core.EXIT_REFUSED or fake.written or "line 1" not in str(exc):
+            bad.append("protected channel: %r" % exc)
+        exc, fake = octo_batch("fan.1.limits.max=60\n", force=True)
+        if exc or len(fake.written) != 1:
+            bad.append("protected channel with --force: %r" % exc)
+        exc, fake = octo_batch("fan.1.limits.max=%s\n" % before["fan.1.limits.max"])
+        if exc or fake.written:
+            bad.append("an unchanged protected channel: %r" % exc)
+        exc, fake = octo_batch("fan.2.protect=on\nfan.3.limits.max=150\n")
+        if not exc or core.protected_channels(SERIAL) != {1}:
+            bad.append("a failed batch changed the protected channels: %r %r"
+                       % (exc, core.protected_channels(SERIAL)))
+        exc, fake = octo_batch("fan.2.protect=on\nfan.1.protect=off\n")
+        if exc or fake.written or core.protected_channels(SERIAL) != {2}:
+            bad.append("protect keys: %r %r" % (exc, core.protected_channels(SERIAL)))
+    finally:
+        core.config_path = real_config
+outcome("batch: fan modes and their settings, protected channels", bad)
+
+bad = []
+# a new effect brings its own parameters; two controllers can trade places
+exc, fake = octo_batch("rgb.controller.1.effect=wave\nrgb.controller.1.param.speed=30\n"
+                       "rgb.controller.1.background=000000\n")
+after = octo_values(fake)
+if exc or (after["rgb.controller.1.effect"], after["rgb.controller.1.param.speed"],
+           after["rgb.controller.1.background"]) != ("wave", "30", "000000"):
+    bad.append("static to wave: %s" % exc)
+exc, fake = octo_batch("rgb.controller.8.pos=16-30\nrgb.controller.9.pos=1-15\n")
+after = octo_values(fake)
+if exc or (after["rgb.controller.8.pos"], after["rgb.controller.9.pos"]) != ("16-30", "1-15"):
+    bad.append("swapping two controllers: %s" % exc)
+exc, fake = octo_batch("rgb.controller.8.pos=16-30\n")
+if not exc or exc.code != core.EXIT_INVALID or fake.written or "share LEDs" not in str(exc):
+    bad.append("an overlap: %r" % exc)
+exc, fake = octo_batch("rgb.controller.1.param.limits=2\n")
+if not exc or "line 1" not in str(exc):
+    bad.append("a parameter static does not have: %r" % exc)
+outcome("batch: RGB controllers - a new effect's keys, trading places, overlaps", bad)
+
+# every fixture's keys, given to another fixture with the same controllers,
+# make every key equal; given back to their own, change nothing
+bad = []
+with tempfile.TemporaryDirectory() as tmp:
+    core.config_path = lambda: os.path.join(tmp, "config.json")
+    try:
+        texts_of = {stem: octo_values(FakeOcto(report(os.path.join(FIX, stem + ".bin"))))
+                    for stem in stems}
+        for i, stem in enumerate(stems):
+            source = texts_of[stem]
+            ctrl = report(os.path.join(FIX, stem + ".bin"))
+            exc, fake = octo_batch("".join("%s=%s\n" % kv for kv in source.items()), ctrl)
+            if exc or fake.written:
+                bad.append("%s onto itself: %s" % (stem, exc))
+            pos = sorted(k for k in source if k.endswith(".pos"))
+            peers = [x for x in stems if x != stem and
+                     sorted(k for k in texts_of[x] if k.endswith(".pos")) == pos]
+            if not peers:
+                continue
+            target = peers[i % len(peers)]
+            exc, fake = octo_batch("".join("%s=%s\n" % kv for kv in source.items()),
+                                   report(os.path.join(FIX, target + ".bin")), force=True)
+            got = octo_values(fake)
+            wrong = [k for k in source if got.get(k) != source[k]]
+            if exc or wrong:
+                bad.append("%s onto %s: %s %s" % (stem, target, exc,
+                                                  [(k, source[k], got.get(k)) for k in wrong[:3]]))
+    finally:
+        core.config_path = real_config
+outcome("batch: every fixture copies onto one with the same controllers, and onto itself "
+        "changes nothing", bad[:4])
+
+total = len(CASES) + 49
 print("\n%d/%d passed" % (total - len(failures), total))
 sys.exit(1 if failures else 0)

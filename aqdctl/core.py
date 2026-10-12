@@ -156,6 +156,21 @@ def require_pct(value, label="percent"):
     return value
 
 
+def check_args(args, serial):
+    """The checks a parsed command gets before it runs, from the command line
+    or from a batch: percentages in range, a power window the right way round,
+    and a protected fan channel."""
+    for field, limit in (("percent", 100.0), ("min", 100.0), ("max", 100.0)):
+        value = getattr(args, field, None)
+        if value is not None and not 0.0 <= value <= limit:
+            sys.exit("%s must be between 0 and %g." % (field, limit))
+    require_window(getattr(args, "min", None), getattr(args, "max", None),
+                   getattr(args, "channel", None))
+    if getattr(args, "guarded", False):
+        guard_channel(serial, getattr(args, "channel", None),
+                      getattr(args, "force", False))
+
+
 def require_window(low, high, channel=None):
     """Refuse an inverted power window.
 
@@ -566,6 +581,11 @@ def show_diff(before, after):
 
 
 def commit(dev, before, after, args):
+    if getattr(dev, "staged", False):
+        # In a batch: the change goes into the batch's copy of the report, and
+        # the batch writes once at the end.
+        dev.stage(after)
+        return
     changes = diff(before, after)
     if not changes:
         print("Nothing to change.")

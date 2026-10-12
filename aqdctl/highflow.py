@@ -14,7 +14,7 @@ import struct
 import sys
 import textwrap
 
-from . import core, keys, names, rgbpx
+from . import batch, core, keys, names, rgbpx
 from .core import be16
 
 NAME = "highflow"
@@ -864,7 +864,8 @@ def _commit(dev, before, after, args, lines):
     """Check, then print what changes, then write. The checks come first, so
     a refusal is not preceded by a change that did not happen."""
     core.reseal(after)
-    if after != before:
+    if after != before and not getattr(dev, "staged", False):
+        # A batch runs the checks once, on all of its changes together.
         guard_write(dev, before, after, args)
     for line in lines:
         print(line)
@@ -1525,6 +1526,7 @@ def build_parser(prefix):
 
     # ----------------------------------------------- backup, restore, alias
     keys.register(sub, prefix)
+    batch.register(sub, prefix)
     core.add_backup_restore(sub, sys.modules[__name__])
     core.add_alias(sub, prefix)
     return ap

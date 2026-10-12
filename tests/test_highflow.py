@@ -1740,7 +1740,170 @@ for byte in range(256):
         bad.append("byte %d -> %s -> written %r" % (byte, k.text(v), fake.written[:1]))
 check("rgb.brightness: all 256 bytes survive the percentage", bad[:3])
 
-# ------------------------------------------------------------- device lock
+# ------------------------------------------------------------------ batch
+# A batch runs each key=value line as the command that sets it, against copies
+# of the reports, judges the changes together, and writes each report once.
+from aqdctl import batch
+
+
+def settable(fake):
+    ctx = keys.Context(highflow, SERIAL, fake)
+    return {k.name: k.text(k.read(ctx)) for k in keys.select(TABLE, ctx) if k.settable}
+
+
+def run_batch(fake, text, *flags, stdin=False):
+    """(status, stdout, stderr) of 'batch' on `fake`, from a file or stdin."""
+    path = os.path.join(BACKUPS, "batch.txt")
+    with open(path, "w") as fh:
+        fh.write(text)
+    fake.serial = HFN
+    discovery.attached = lambda: both
+    core.Device = lambda kind, p, serial: fake
+    real_stdin = sys.stdin
+    if stdin:
+        sys.stdin = io.StringIO(text)
+    try:
+        return run_cli(["--device", HFN, "batch", "-" if stdin else path] + list(flags))
+    finally:
+        discovery.attached, core.Device = real_attached, real_device
+        sys.stdin = real_stdin
+
+
+def as_lines(values):
+    return "".join("%s=%s\n" % kv for kv in values.items())
+
+
+# what get prints, given back, changes nothing - read-only keys included, which
+# a batch skips; given to another capture, it makes every key equal the source's
+bad = []
+fake = FakeHighflow()
+everything = "".join("%s=%s\n" % (k.name, k.text(v)) for k, v in
+                     keys.read(TABLE, keys.Context(highflow, SERIAL, fake)))
+everything = everything.replace("device.serial=%s" % SERIAL, "device.serial=09876-54321")
+status, out, err = run_batch(fake, everything, "-y")
+if (status, out, fake.written) != (0, "Nothing to change.\n", []):
+    bad.append("all of get's output: %r %r %r" % (status, out, err))
+for i, stem in enumerate(STEMS):
+    fake = FakeHighflow(stem)
+    status, out, err = run_batch(fake, as_lines(settable(fake)), "-y")
+    if (status, out, fake.written) != (0, "Nothing to change.\n", []):
+        bad.append("%s onto itself: %r %r %r" % (stem, status, out, err[-200:]))
+    source = settable(FakeHighflow(stem))
+    target = FakeHighflow(STEMS[(i * 7 + 3) % len(STEMS)])
+    status, out, err = run_batch(target, as_lines(source), "-y", "--force")
+    got = settable(target)
+    wrong = [k for k in source if got[k] != source[k]]
+    if status or wrong or len(target.written) > 1:
+        bad.append("%s onto %s: status %r, %d writes, differ: %s %s"
+                   % (stem, STEMS[(i * 7 + 3) % len(STEMS)], status, len(target.written),
+                      wrong[:3], err[-200:]))
+check("batch: get's output changes nothing on its own capture, and copies onto another",
+      bad[:4])
+
+# one write for many lines; settings and names are two
+bad = []
+fake = FakeHighflow()
+status, out, err = run_batch(fake, """
+# a comment, and blank lines
+
+display.brightness=high
+alarm.flow.limit=60
+system.standby.without-aquabus=on
+flow.calibration.corrections=0,0,0,0,0,0,0,1,1,0
+""", "-y")
+if status or len(fake.written) != 1:
+    bad.append("four settings: status %r, %d writes: %s" % (status, len(fake.written), err))
+for line in ("display.brightness: low -> high", "alarm.flow.limit: 45.0 -> 60.0",
+             "flow.calibration.corrections: 0,0,0,0,0,0,0,0,0,0 -> 0,0,0,0,0,0,0,1,1,0"):
+    if line not in out:
+        bad.append("missing %r in:\n%s" % (line, out))
+fake = FakeHighflow()
+status, out, err = run_batch(fake, "display.rotate=on\nname.sensor.internal=Loop In\n", "-y")
+if status or sorted(buf[0] for buf in fake.written) != [3, 8]:
+    bad.append("settings and names: %r, wrote %r" % (status, [b[0] for b in fake.written]))
+check("batch: many lines make one write per report", bad)
+
+# all or nothing, and the line that failed is named
+bad = []
+for text, status_wanted, words in (
+        ("display.brightness=high\nalarm.flow.limit=60\ndisplay.brightness=low\n",
+         core.EXIT_INVALID, "line 3: display.brightness is already set on line 1"),
+        ("display.brightness=high\ndisplay.idle-brightness=dim\n", core.EXIT_USAGE,
+         "line 2 (display.idle-brightness=dim): argument value: invalid choice"),
+        ("alarm.flow.limit=2000\n", core.EXIT_INVALID, "line 1 (alarm.flow.limit=2000): "
+         "The flow alarm limit is 0-1000"),
+        ("display.rotat=on\n", core.EXIT_INVALID, "is not a key of this high flow NEXT"),
+        ("rgb.controller.5.pos=1-3\n", core.EXIT_INVALID, "that controller is not in use"),
+        ("display.rotate on\n", core.EXIT_INVALID, "is not key=value"),
+        ("display.rotate=maybe\n", core.EXIT_INVALID, "on or off"),
+        ("system.usb-current=1000\n", core.EXIT_REFUSED, "requires --force")):
+    fake = FakeHighflow()
+    status, out, err = run_batch(fake, text, "-y")
+    if status != status_wanted or fake.written or words not in err:
+        bad.append("%r: status %r, %d writes: %s" % (text, status, len(fake.written), err))
+check("batch: a bad line writes nothing and is named", bad)
+
+# changes judged together: each line passes alone, the two together make the
+# flow alarm fire (206.5 l/h, 5 % less at 200-250 l/h, limit 200)
+bad = []
+together = ("alarm.flow.state=on\nalarm.flow.limit=200\n"
+            "flow.calibration.corrections=0,0,0,0,0,0,0,-5,-5,0\n")
+for text in ("alarm.flow.state=on\nalarm.flow.limit=200\n",
+             "flow.calibration.corrections=0,0,0,0,0,0,0,-5,-5,0\n"):
+    fake = FakeHighflow()
+    status, out, err = run_batch(fake, text, "-y")
+    if status or len(fake.written) != 1:
+        bad.append("alone, %r: %r %s" % (text, status, err))
+fake = FakeHighflow()
+status, out, err = run_batch(fake, together, "-y")
+if status != core.EXIT_REFUSED or fake.written or "196" not in err:
+    bad.append("together: %r %d writes %s" % (status, len(fake.written), err))
+fake = FakeHighflow()
+status, out, err = run_batch(fake, together, "-y", "--force")
+if status or len(fake.written) != 1:
+    bad.append("together with --force: %r %s" % (status, err))
+# and the other way round: turning the alarm on at 210 l/h alone would fire it,
+# the calibration that comes with it lifts the flow to 216.8
+fake = FakeHighflow()
+status, out, err = run_batch(fake, "alarm.flow.state=on\nalarm.flow.limit=210\n"
+                             "flow.calibration.corrections=0,0,0,0,0,0,0,5,5,0\n", "-y")
+if status or len(fake.written) != 1:
+    bad.append("refused alone, fine together: %r %s" % (status, err))
+check("batch: the safety checks judge all changes together", bad)
+
+# dry run, stdin, JSON
+bad = []
+fake = FakeHighflow()
+status, out, err = run_batch(fake, "display.brightness=high\n", "-n")
+if (status, out, fake.written) != (0, "display.brightness: low -> high\n"
+                                      "byte changes (excluding checksum): 1\n"
+                                      "  0x00f: 02 -> 00\n  checksum resealed\n"
+                                      "--dry-run: nothing written.\n", []):
+    bad.append("-n: %r %r" % (status, out))
+fake = FakeHighflow()
+status, out, err = run_batch(fake, "display.brightness=high\n")
+if status != core.EXIT_NOT_CONFIRMED or fake.written:
+    bad.append("no -y and no terminal: %r %r" % (status, err))
+fake = FakeHighflow()
+status, out, err = run_batch(fake, "display.brightness=high\n", stdin=True)
+if status != core.EXIT_NOT_CONFIRMED or fake.written or "-y" not in err:
+    bad.append("stdin without -y: %r %r" % (status, err))
+status, out, err = run_batch(fake, "display.brightness=high\n", "-y", stdin=True)
+if status or len(fake.written) != 1:
+    bad.append("stdin with -y: %r %r" % (status, err))
+fake = FakeHighflow()
+status, out, err = run_batch(fake, "display.brightness=high\nalarm.flow.limit=60\n",
+                             "-y", "--json")
+if json.loads(out) != {"changes": [{"key": "display.brightness", "old": "low", "new": "high"},
+                                   {"key": "alarm.flow.limit", "old": 45, "new": 60}],
+                       "written": True}:
+    bad.append("--json: %r" % out)
+fake = FakeHighflow()
+status, out, err = run_batch(fake, "display.brightness=dim\n", "-y", "--json")
+if status != core.EXIT_USAGE or json.loads(out)["error"]["status"] != core.EXIT_USAGE:
+    bad.append("--json failure: %r %r" % (status, out))
+check("batch: --dry-run, confirmation, stdin needs -y, --json for changes and failures", bad)
+
 # one aqdctl at a time changes a device
 bad = []
 with core.device_lock(HFN):

@@ -169,7 +169,7 @@ def select(table, ctx, prefixes=()):
     return out
 
 
-def _matches(name, prefix):
+def matches(name, prefix):
     """_under for template names, where N and NAME stand for any one part:
     rgb.controller.N.param.NAME is under rgb.controller.3.param.speed's
     prefixes, and rgb.controller.3 is a prefix of it."""
@@ -184,7 +184,7 @@ def schema(table, prefixes=()):
     for entry in table:
         candidates = entry.template if isinstance(entry, Family) else [entry]
         out += [k for k in candidates
-                if not prefixes or any(_matches(k.name, p) for p in prefixes)]
+                if not prefixes or any(matches(k.name, p) for p in prefixes)]
     return out
 
 
@@ -207,7 +207,7 @@ def cmd_get(dev, args):
     prefixes = args.prefix
     if args.keys:
         listed = schema(table, prefixes)
-        _require_matches(dev, prefixes, [k.name for k in listed], _matches)
+        _require_matches(dev, prefixes, [k.name for k in listed], matches)
         if args.json:
             print(json.dumps([k.schema() for k in listed], indent=2, ensure_ascii=False))
             return

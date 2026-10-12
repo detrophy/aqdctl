@@ -379,6 +379,17 @@ def overlapping(buf, layout, channel, first, last, exclude=None):
     return hits
 
 
+def first_overlap(buf, layout):
+    """(n, m, channel) for the first two controllers sharing an LED, or None."""
+    for i in range(1, layout.count + 1):
+        span = controller_span(buf, layout, i)
+        if span is not None:
+            clash = overlapping(buf, layout, span[0], span[1], span[2], exclude=i)
+            if clash:
+                return i, clash[0][0], span[0]
+    return None
+
+
 def free_slot(buf, layout, channel):
     """The channel's lowest unused controller number, or None."""
     for i in layout.slots(channel):
@@ -864,7 +875,9 @@ def cmd_rgb_set(dev, args):
         first, count = parse_position(args.pos, layout.max_led(channel))
         last = first + count - 1
         clash = overlapping(buf, layout, channel, first, last, exclude=index)
-        if clash:
+        # A batch checks the controllers where they end up, so two of them
+        # can trade places.
+        if clash and not getattr(dev, "staged", False):
             _refuse_overlap(clash, channel, first, last)
         after[base + RGB_START] = first - 1
         after[base + RGB_COUNT_OFF] = count
