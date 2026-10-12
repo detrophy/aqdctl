@@ -316,7 +316,7 @@ for text in ("high flow NEXT %s   firmware 1017   (live readings from report 0x0
     if text not in out:
         bad.append("missing: %r" % text)
 out = run(highflow.cmd_info, FakeHighflow(BY_NUMBER[8]), argparse.Namespace(section="flow"))
-if "calibration       20 l/h: -1.00, 30 l/h: +1.00, 50 l/h: +1.00" not in out:
+if "calibration       20 l/h: -1.00 %, 30 l/h: +1.00 %, 50 l/h: +1.00 %" not in out:
     bad.append("capture 08's calibration is not shown:\n" + out)
 out = run(highflow.cmd_info, FakeHighflow(BY_NUMBER[16]), argparse.Namespace(section="display"))
 if "page change       off" not in out:
@@ -1189,6 +1189,60 @@ for kind, buf in usb_sequence(CAP):
 if parted < 10:
     bad.append("only %d live reports with the two flows apart" % parted)
 check("live flow: calibrated at 0x53, raw at 0x51, as capture 10 shows", bad)
+
+# ------------------------ the calibration table applied, from capture 10
+# calibrated_flow() must turn the raw flow into the device's calibrated one,
+# under the settings written last, in every live report of capture 10.
+bad, settings, compared, parted = [], None, 0, 0
+for kind, buf in usb_sequence(CAP):
+    if kind == "write":
+        settings = buf
+        continue
+    if settings is None:
+        continue
+    live = highflow.decode_live(buf)
+    predicted = highflow.calibrated_flow(live["flow_raw"], settings)
+    compared += 1
+    parted += live["flow"] != live["flow_raw"]
+    # the device shows the flow to 0.1 l/h
+    if predicted is None or abs(predicted - live["flow"]) > 0.1:
+        bad.append("raw %.1f l/h: predicted %r, the device shows %.1f"
+                   % (live["flow_raw"], predicted, live["flow"]))
+if compared < 30 or parted < 10:
+    bad.append("only %d live reports compared, %d with a correction in effect" % (compared, parted))
+# outside the table nothing is predicted; inside it with no corrections, nothing changes
+table = bytearray(capture("01-baseline"))
+if highflow.calibrated_flow(206.0, table) != 206.0:
+    bad.append("with no corrections the flow changed")
+for i in range(highflow.CALIBRATION_COUNT):
+    struct.pack_into(">h", table, highflow.CALIBRATION + 2 * i, 100)
+if highflow.calibrated_flow(400.0, table) is not None:
+    bad.append("a flow above the last rate was given a calibrated value")
+if abs(highflow.calibrated_flow(100.0, table) - 101.0) > 1e-9:
+    bad.append("+1 %% everywhere does not give +1 %%")
+check("calibrated flow: %d live reports of capture 10 predicted to 0.1 l/h" % compared, bad)
+
+# the fallback through the kernel driver, which only has the raw flow
+bad = []
+with tempfile.TemporaryDirectory() as tmp:
+    for leaf, text in (("fan1_input", "2060"), ("temp1_input", "26160")):
+        with open(os.path.join(tmp, leaf), "w") as fh:
+            fh.write(text + "\n")
+    real = discovery.hwmon_dir
+    discovery.hwmon_dir = lambda serial: tmp
+    try:
+        plain = highflow.read_live_hwmon(SERIAL, capture("01-baseline"))
+        corrected = highflow.read_live_hwmon(SERIAL, table)
+        bare = highflow.read_live_hwmon(SERIAL)
+    finally:
+        discovery.hwmon_dir = real
+if (plain["flow"], plain["flow_raw"]) != (206.0, 206.0):
+    bad.append("no corrections: %r" % ((plain["flow"], plain["flow_raw"]),))
+if corrected["flow_raw"] != 206.0 or abs(corrected["flow"] - 208.06) > 1e-9:
+    bad.append("+1 %% everywhere: %r" % ((corrected["flow"], corrected["flow_raw"]),))
+if bare["flow"] != 206.0:
+    bad.append("without settings the driver's flow is not passed through")
+check("kernel driver fallback: its flow is the raw one, calibrated from the settings", bad)
 
 print("\n%d/%d passed" % (checks - len(failures), checks))
 sys.exit(1 if failures else 0)

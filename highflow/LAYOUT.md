@@ -128,9 +128,15 @@ from `68-display-chart1-1s-chart2-30s`.
   the minus signs.
 - For 0x02f and 0x030, other values of the coolant and connector lists are
   unknown.
-- The correction unit at 0x031 was not recorded; the stored value is the
-  entered value x 100. Aquasuite's range is -50 to +50: both ends were written
-  in `../usb-captures/11-highflow-flow-calibration-min-max`.
+- The corrections at 0x031 are percentages, stored x 100, and the device
+  interpolates them linearly between the two rates either side of the flow.
+  In `../usb-captures/10-highflow-flow-calibration` the calibrated flow in
+  report 0x01 (0x53) left the raw one (0x51) when the 202 l/h correction
+  became +1 %: 205.9 -> 207.7 l/h, where the interpolation predicts 207.78.
+  All 42 live reports after a calibration write match that rule to the
+  display's 0.1 l/h. Aquasuite's range is -50 % to +50 %: both ends were
+  written in `../usb-captures/11-highflow-flow-calibration-min-max`. What the
+  device does outside the first and last rate was not captured.
 - Both arrays are writable and fully confirmed: in
   `../usb-captures/10-highflow-flow-calibration` Aquasuite moved seven of the
   ten rates (30 -> 31, 50 -> 51, 100 -> 99, 125 -> 124, 150 -> 149, 200 -> 202,

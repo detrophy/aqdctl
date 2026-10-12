@@ -314,9 +314,31 @@ def decode_live(buf):
     }
 
 
-def read_live_hwmon(serial):
+def calibrated_flow(raw, settings):
+    """The flow the device shows for a raw reading, under the calibration in
+    `settings`. The corrections are percentages, interpolated linearly between
+    the two rates either side of the flow: that reproduces the device's own
+    calibrated flow in ../usb-captures/10 to its 0.1 l/h resolution. None
+    outside the table, where what the device does was not captured."""
+    if raw is None:
+        return None
+    s = decode(settings)
+    rates = [p / 10.0 for p in s["calibration_points"]]
+    corrections = [c / 100.0 for c in s["calibration"]]
+    if not any(corrections):
+        return raw
+    for (r0, c0), (r1, c1) in zip(zip(rates, corrections),
+                                  zip(rates[1:], corrections[1:])):
+        if r0 <= raw <= r1:
+            return raw * (1 + (c0 + (raw - r0) / (r1 - r0) * (c1 - c0)) / 100.0)
+    return None
+
+
+def read_live_hwmon(serial, settings=None):
     """The kernel driver's readings, if report 0x01 could not be read. It has
-    no volume counter, and a few of its units differ from its labels."""
+    no volume counter, a few of its units differ from its labels, and its flow
+    is the one before calibration: the calibrated one is worked out from
+    `settings`, the settings report, when given."""
     from . import discovery
     path = discovery.hwmon_dir(serial)
     if path is None:
@@ -331,10 +353,12 @@ def read_live_hwmon(serial):
 
     external = read("temp2_input", 1000.0)
     power = read("power1_input", 1000000.0)
+    flow_raw = read("fan1_input", 10.0)
     return {
         "source": "the kernel driver",
         "firmware": None,
-        "flow": read("fan1_input", 10.0),
+        "flow": calibrated_flow(flow_raw, settings) if settings else flow_raw,
+        "flow_raw": flow_raw,
         "internal": read("temp1_input", 1000.0),
         "external": external,
         "water_quality": read("fan2_input", 100.0),
@@ -349,11 +373,12 @@ def read_live_hwmon(serial):
     }
 
 
-def read_live(dev):
+def read_live(dev, settings=None):
     """Live readings: report 0x01, which the device sends on its own (nothing
-    is sent to it), or the kernel driver's if none arrives in time."""
+    is sent to it), or the kernel driver's if none arrives in time. `settings`,
+    the current settings report, lets the fallback calibrate its flow."""
     buf = dev.read_input(INPUT_REPORT_SIZE, 1500)
-    return decode_live(buf) if buf else read_live_hwmon(dev.serial)
+    return decode_live(buf) if buf else read_live_hwmon(dev.serial, settings)
 
 
 # ------------------------------------------------------------------ output
@@ -412,7 +437,7 @@ def info_flow(s, live):
     print("  now               %s" % _num(live.get("flow"), "%.1f", "l/h"))
     print("  coolant           %s" % _name(COOLANTS, s["coolant"]))
     print("  connector         %s" % _name(CONNECTORS, s["connector"]))
-    corrections = ["%g l/h: %+.2f" % (point / 10.0, value / 100.0)
+    corrections = ["%g l/h: %+.2f %%" % (point / 10.0, value / 100.0)
                    for point, value in zip(s["calibration_points"], s["calibration"])
                    if value]
     print("  calibration       %s" % (", ".join(corrections) or "no corrections"))
@@ -531,7 +556,7 @@ def cmd_info(dev, args):
     except Exception:
         labels = {g.cli: [""] * g.count for g in NAME_GROUPS}
     want = getattr(args, "section", None)
-    show(buf, labels, read_live(dev), [want] if want else SECTIONS, dev.serial)
+    show(buf, labels, read_live(dev, buf), [want] if want else SECTIONS, dev.serial)
 
 
 def identify(labels):
@@ -669,7 +694,7 @@ def _alarm_guard(dev, before, after, args):
             candidates.append((alarm, on))
     if not candidates:
         return
-    live = read_live(dev)
+    live = read_live(dev, before)
     problems = []
     for alarm, on in candidates:
         limit = alarm.limit(after)
@@ -814,9 +839,9 @@ def cmd_chart(dev, args):
                                         text(be16(after, base), be16(after, base + 2)))])
 
 
-# Aquasuite's own limit, both ends written in
-# ../usb-captures/11-highflow-flow-calibration-min-max. The unit the software
-# puts beside the field was not recorded; the device stores the value x100.
+# Percent, x100 in the report, applied by linear interpolation between the
+# rates (see calibrated_flow). The range is Aquasuite's own, both ends written in
+# ../usb-captures/11-highflow-flow-calibration-min-max.
 CALIBRATION_LIMIT = 50.0
 # Aquasuite's range for the flow rates, read off its UI by the owner rather than
 # from a capture. They must rise, which is how every capture has them and what
@@ -867,7 +892,7 @@ def cmd_calibration(dev, args):
     if args.corrections is not None:
         new_values = _ten(args.corrections, "corrections")
         if any(abs(v) > CALIBRATION_LIMIT for v in new_values):
-            sys.exit("Corrections are %+g to %+g, the range Aquasuite allows."
+            sys.exit("Corrections are %+g %% to %+g %%, the range Aquasuite allows."
                      % (-CALIBRATION_LIMIT, CALIBRATION_LIMIT))
         for i, value in enumerate(new_values):
             struct.pack_into(">h", after, CALIBRATION + 2 * i, int(round(value * 100)))
@@ -878,7 +903,7 @@ def cmd_calibration(dev, args):
     for i in range(CALIBRATION_COUNT):
         lines.append("  %2d   %-20s %s"
                      % (i + 1, _pair(rates[i], new_rates[i], "%g") + " l/h",
-                        _pair(values[i], new_values[i], "%+.2f")))
+                        _pair(values[i], new_values[i], "%+.2f") + " %"))
     if args.points is None and args.corrections is None:
         print("\n".join(lines))
         return
@@ -1200,7 +1225,8 @@ def build_parser(prefix):
         "calibration", formatter_class=core.HelpFormatter,
         help="the ten flow rates and the correction at each",
         description="Aquasuite's manual calibration: ten flow rates and the "
-                    "correction applied at each of them. Both are settable, ten "
+                    "correction, in percent, applied at each of them; between two "
+                    "rates the correction is interpolated. Both are settable, ten "
                     "values at a time; with neither flag the table is printed. "
                     "The flow alarm sees the corrected flow.",
         epilog="The factory rates are 20,30,50,70,100,125,150,200,250,300 l/h.\n\n"
@@ -1213,7 +1239,7 @@ def build_parser(prefix):
                    help="the ten flow rates in l/h, %g-%g and rising"
                         % (POINT_MIN, POINT_MAX))
     p.add_argument("--corrections", metavar="C1,...,C10",
-                   help="the correction at each rate, %+g to %+g"
+                   help="the correction at each rate in percent, %+g to %+g"
                         % (-CALIBRATION_LIMIT, CALIBRATION_LIMIT))
     p.set_defaults(func=cmd_calibration)
 

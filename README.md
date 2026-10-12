@@ -256,9 +256,9 @@ flow calibration [--points P1,...,P10] [--corrections C1,...,C10]
                                         have to rise, the factory ones being 20,
                                         30, 50, 70, 100, 125, 150, 200, 250
                                         and 300.
-                                        Corrections run from -50 to +50, the
-                                        range Aquasuite allows. The flow alarm
-                                        sees the corrected flow.
+                                        Corrections are percentages, -50 to
+                                        +50, interpolated between the rates.
+                                        The flow alarm sees the corrected flow.
 ```
 
 Sensors (high flow NEXT):
