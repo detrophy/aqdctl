@@ -28,6 +28,12 @@ CTRL_REPORT_DELAY = 0.2     # s between requests; the kernel driver keeps the sa
 FIRMWARE_OFFSET = 0x0D
 LIVE_WAIT_MS = 1500         # the device sends its live readings once a second
 
+# Bytes 1-2 of the settings report, big-endian: the version of its layout. It
+# is 1 on the high flow NEXT and 2 on the Octo in every capture, and Aquasuite
+# checks it before using a report. A firmware that moved the fields would have
+# to change it.
+STRUCTURE_OFFSET = 1
+
 # A serial as the USB descriptor and Aquasuite give it: two five-digit groups.
 SERIAL_PATTERN = re.compile(r"\d{5}-\d{5}")
 
@@ -74,6 +80,22 @@ def put_be16(buf, off, val):
 def firmware(live):
     """Firmware version from a live-readings report."""
     return be16(live, FIRMWARE_OFFSET)
+
+
+def layout_version(settings):
+    """The layout version a settings report declares."""
+    return be16(settings, STRUCTURE_OFFSET)
+
+
+def check_layout(kind, settings):
+    """Refuse a settings report laid out differently from the one this module
+    decodes. Every offset in it would be a guess."""
+    found = layout_version(settings)
+    if found != kind.STRUCTURE_ID:
+        sys.exit("The %s's settings use layout version %d; aqdctl knows version %d.\n"
+                 "A firmware update may have moved its fields, so aqdctl reads no further\n"
+                 "and writes nothing. 'backup' still saves the raw reports."
+                 % (kind.TITLE, found, kind.STRUCTURE_ID))
 
 
 def pct(raw):
@@ -283,7 +305,10 @@ class Device:
         if wait > 0:
             time.sleep(wait)
 
-    def read(self, report_id=CTRL_REPORT_ID):
+    def read(self, report_id=CTRL_REPORT_ID, check=True):
+        """One feature report, its size and checksum checked, and for the
+        settings report its layout version. `check=False` skips the version
+        check, for saving reports that are not decoded."""
         size = self.kind.REPORT_SIZES[report_id]
         self._pace()
         buf = bytes(self.dev.get_feature_report(report_id, size))
@@ -296,6 +321,8 @@ class Device:
             sys.exit("Report %#04x checksum mismatch (stored %#06x, computed %#06x).\n"
                      "Refusing to continue - the layout assumptions do not hold on this "
                      "firmware." % (report_id, stored, computed))
+        if check and report_id == CTRL_REPORT_ID:
+            check_layout(self.kind, buf)
         return bytearray(buf)
 
     def write(self, buf):
@@ -449,7 +476,9 @@ def commit(dev, before, after, args):
 
 def cmd_backup(dev, args):
     for rid in (CTRL_REPORT_ID, LABEL_REPORT_ID):
-        buf = dev.read(rid)
+        # A report of an unknown layout is still worth saving: it is what a new
+        # firmware's layout gets mapped from.
+        buf = dev.read(rid, check=False)
         target = args.output
         if target and rid != CTRL_REPORT_ID:
             root, ext = os.path.splitext(target)
@@ -474,6 +503,10 @@ def cmd_restore(dev, args):
     stored, computed = report_crc(saved)
     if stored != computed:
         sys.exit("%s has a bad checksum - refusing to restore it." % args.file)
+    if rid == CTRL_REPORT_ID and layout_version(saved) != dev.kind.STRUCTURE_ID:
+        sys.exit("%s holds settings of layout version %d; the %s uses version %d.\n"
+                 "Its fields would land in the wrong places, so it is not restored."
+                 % (args.file, layout_version(saved), dev.kind.TITLE, dev.kind.STRUCTURE_ID))
     force = getattr(args, "force", False)
     # Settings reports carry no serial, so the file name is the only record of
     # where a backup came from. Restoring another device's settings would copy

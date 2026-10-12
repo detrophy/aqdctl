@@ -54,6 +54,10 @@ contains values that change on their own.
 
 ## 0x03: settings
 
+Bytes 0x001-0x002 (u16) are the layout version of the report: 1 in all 84
+captures. Aquasuite checks it before using a report, and aqdctl refuses a
+settings report of any other version, since its fields may have moved.
+
 ### Display
 
 | Offset | Type           | Meaning                                                                                 | Capture                                                            |
@@ -268,7 +272,7 @@ Notes:
 
 ### Unmapped
 
-- Bytes: 0x001-0x002 (`00 01`), 0x005, 0x007-0x008, 0x00b-0x00e,
+- Bytes: 0x005, 0x007-0x008, 0x00b-0x00e,
   0x011-0x014 (u16 700, 600), 0x026, 0x05a, 0x28c, 0x28e-0x291,
   0x296-0x299 (`00 00 00 96`), 0x29c and 0x2a7 (`01`; it sits at size-3,
   where the Octo keeps its profile index).

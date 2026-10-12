@@ -59,7 +59,11 @@ class FakeHighflow:
 
     def __enter__(self): return self
     def __exit__(self, *exc): pass
-    def read(self, report_id=core.CTRL_REPORT_ID): return bytearray(self.blobs[report_id])
+    def read(self, report_id=core.CTRL_REPORT_ID, check=True):
+        buf = bytearray(self.blobs[report_id])
+        if check and report_id == core.CTRL_REPORT_ID:
+            core.check_layout(self.kind, buf)      # as core.Device.read does
+        return buf
     def read_input(self, size, timeout_ms=0):
         return self.live() if callable(self.live) else self.live
     def write(self, buf):
@@ -1269,6 +1273,69 @@ out, err, code = do(fake, "flow calibration --corrections 0,0,0,0,0,0,0,-5,-5,0"
 if not code or "196" not in code:
     bad.append("the refusal does not give the flow the alarm would see: %r" % code)
 check("flow alarm: a calibration change that crosses its limit is refused", bad)
+
+
+# ------------------------------------------- the settings layout version
+# Bytes 1-2 of the settings report declare its layout. Everything aqdctl
+# decodes depends on it, so a report of another version is refused before
+# anything is read from it or written - except by 'backup', whose raw copy is
+# what a new layout gets mapped from.
+def other_layout(stem="01-baseline", version=2):
+    buf = bytearray(capture(stem))
+    core.put_be16(buf, core.STRUCTURE_OFFSET, version)
+    return core.reseal(buf)
+
+
+bad = [stem for stem in STEMS if core.layout_version(capture(stem)) != highflow.STRUCTURE_ID]
+if bad:
+    bad = ["captures not at layout version %d: %s" % (highflow.STRUCTURE_ID, ", ".join(bad))]
+
+
+class FakeHid:
+    """Stands in for hidapi below core.Device, so its own read() is tested."""
+    def __init__(self, blob):
+        self.blob = bytes(blob)
+
+    def get_feature_report(self, report_id, size):
+        return list(self.blob)
+
+
+for blob, verify, refused in ((capture("01-baseline"), True, False),
+                             (other_layout(), True, True),
+                             (other_layout(), False, False)):
+    dev = core.Device(highflow, b"/nonexistent", SERIAL)
+    dev.dev = FakeHid(blob)
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            dev.read(check=verify)
+        if refused:
+            bad.append("core.Device.read accepted layout version %d" % core.layout_version(blob))
+    except SystemExit as exc:
+        if not refused:
+            bad.append("core.Device.read refused (check=%s): %s" % (verify, exc))
+        elif "layout version 2; aqdctl knows version 1" not in flat(exc):
+            bad.append("the refusal does not name both versions: %s" % exc)
+for line in ("info", "display brightness high", "flow calibration"):
+    fake = FakeHighflow()
+    fake.blobs[core.CTRL_REPORT_ID] = other_layout()
+    out, err, code = do(fake, line)
+    if code is None or fake.written:
+        bad.append("%r ran on another layout" % line)
+with tempfile.TemporaryDirectory() as tmp:
+    fake = FakeHighflow()
+    fake.blobs[core.CTRL_REPORT_ID] = other_layout()
+    out, err, code = do(fake, "backup -o %s" % os.path.join(tmp, "new-layout.bin"))
+    saved = os.path.join(tmp, "new-layout.bin")
+    if code is not None or not os.path.exists(saved) or open(saved, "rb").read() != bytes(other_layout()):
+        bad.append("backup did not save a report of another layout: %s" % code)
+    theirs = os.path.join(tmp, "highflow-%s-03-other.bin" % SERIAL)
+    with open(theirs, "wb") as fh:
+        fh.write(bytes(other_layout()))
+    fake = FakeHighflow()
+    out, err, code = do(fake, "restore %s --force" % theirs)
+    if code is None or "layout version 2" not in flat(code) or fake.written:
+        bad.append("a backup of another layout was restored: %r" % code)
+check("layout version: every capture is at 1; other versions are refused, backup excepted", bad)
 
 print("\n%d/%d passed" % (checks - len(failures), checks))
 sys.exit(1 if failures else 0)

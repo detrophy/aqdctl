@@ -36,7 +36,11 @@ class FakeOcto:
         self.written, self.blobs = [], dict(BLOBS)
         if ctrl is not None:
             self.blobs[m.CTRL_REPORT_ID] = bytes(ctrl)
-    def read(self, report_id=m.CTRL_REPORT_ID): return bytearray(self.blobs[report_id])
+    def read(self, report_id=m.CTRL_REPORT_ID, check=True):
+        buf = bytearray(self.blobs[report_id])
+        if check and report_id == m.CTRL_REPORT_ID:
+            core.check_layout(self.kind, buf)      # as core.Device.read does
+        return buf
     def write(self, buf):
         stored, computed = m.report_crc(buf)
         assert stored == computed, "wrote a report with a stale checksum"
@@ -1206,6 +1210,29 @@ if bad:
 else:
     print("  ok    command forms: %d parse, %d malformed ones refused" % (len(forms), len(malformed)))
 
-total = len(CASES) + 39
+# every Octo capture declares the layout the module decodes, and another is refused
+bad = []
+for f in sorted(os.listdir(FIX)):
+    if f.endswith(".bin") and not f.endswith("-08.bin"):
+        buf = open(os.path.join(FIX, f), "rb").read()
+        if len(buf) == m.CTRL_REPORT_SIZE and core.layout_version(buf) != octo.STRUCTURE_ID:
+            bad.append(f)
+moved = bytearray(BLOBS[m.CTRL_REPORT_ID])
+core.put_be16(moved, core.STRUCTURE_OFFSET, 3)
+core.reseal(moved)
+try:
+    with contextlib.redirect_stdout(io.StringIO()):
+        m.cmd_info(FakeOcto(ctrl=moved), ns(section=None))
+    bad.append("info ran on layout version 3")
+except SystemExit as exc:
+    if "layout version 3; aqdctl knows version 2" not in " ".join(str(exc).split()):
+        bad.append("wrong refusal: %s" % exc)
+if bad:
+    failures.append(("layout version", "; ".join(bad)))
+    print("  FAIL  layout version: %s" % "; ".join(bad))
+else:
+    print("  ok    layout version: every capture is at 2, and 3 is refused")
+
+total = len(CASES) + 40
 print("\n%d/%d passed" % (total - len(failures), total))
 sys.exit(1 if failures else 0)

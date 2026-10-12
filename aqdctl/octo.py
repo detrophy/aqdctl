@@ -24,6 +24,9 @@ LABEL_REPORT_SIZE = 1013
 INPUT_REPORT_SIZE = 327         # live readings, from USB captures of Aquasuite
 REPORT_SIZES = {core.CTRL_REPORT_ID: CTRL_REPORT_SIZE,
                 core.LABEL_REPORT_ID: LABEL_REPORT_SIZE}
+# The settings layout this module decodes, as bytes 1-2 of report 0x03 declare
+# it; core.check_layout refuses any other.
+STRUCTURE_ID = 2
 HAS_FANS = True
 FAN_CHANNELS = 8
 

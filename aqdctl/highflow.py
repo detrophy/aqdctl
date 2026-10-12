@@ -25,6 +25,9 @@ LABEL_REPORT_SIZE = 773
 INPUT_REPORT_SIZE = 164
 REPORT_SIZES = {core.CTRL_REPORT_ID: CTRL_REPORT_SIZE,
                 core.LABEL_REPORT_ID: LABEL_REPORT_SIZE}
+# The settings layout this module decodes, as bytes 1-2 of report 0x03 declare
+# it; core.check_layout refuses any other.
+STRUCTURE_ID = 1
 HAS_FANS = False
 
 # --- report 0x08: 32 name slots of 24 bytes (3 + 32*24 = 771, the checksum
