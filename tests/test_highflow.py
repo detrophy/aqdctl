@@ -1466,6 +1466,80 @@ if "6  not confirmed" not in cli.general_help():
     bad.append("the general help does not list the exit statuses")
 check("exit statuses: each outcome its own, -q silent, no terminal never blocks", bad)
 
+# ------------------------------------------------------------ aliases
+# An alias stands in for the serial in --device, and is kept in the config
+# next to the protected channels.
+def run_cli(argv):
+    """(status, stdout, stderr) of one command line."""
+    out, err = io.StringIO(), io.StringIO()
+    try:
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            cli.main(argv)
+        status = 0
+    except SystemExit as exc:
+        status = exc.code
+    return status, out.getvalue(), err.getvalue()
+
+
+bad = []
+real_config = core.config_path
+tmp = tempfile.mkdtemp()
+core.config_path = lambda: os.path.join(tmp, "config.json")
+def own_serial(kind, path, serial):
+    """A fake that answers to the serial it was opened with."""
+    dev = fake_device(kind, path, serial)
+    dev.serial = serial
+    return dev
+
+
+discovery.attached = lambda: both
+core.Device = own_serial
+try:
+    core.set_protected(HFN, {1})
+    status, out, err = run_cli(["--device", HFN, "alias", "loop-a"])
+    if status or "loop-a" not in out:
+        bad.append("setting an alias: %r %r" % (status, err))
+    if core.protected_channels(HFN) != {1}:
+        bad.append("setting an alias lost the protected channels")
+    for argv, want in (([HFN], "loop-a\n"), ([OCTO], "-\n")):
+        status, out, err = run_cli(["--device"] + argv + ["alias"])
+        if (status, out) != (0, want):
+            bad.append("alias of %s: %r %r" % (argv[0], status, out))
+    del opened[:]
+    status, out, err = run_cli(["--device", "loop-a", "info", "alarm"])
+    if status or opened != [("highflow", HFN)]:
+        bad.append("--device loop-a: status %r, opened %r" % (status, opened))
+    before = open(core.config_path()).read()
+    for name, why in (("Loop", "upper case"), ("1loop", "a digit first"),
+                      ("12345-67890", "a serial"), ("a b", "a space"), ("", "empty"),
+                      ("a" * 33, "33 characters"), ("loop-a", "taken by the other device")):
+        status, out, err = run_cli(["--device", OCTO, "alias", name])
+        if status != core.EXIT_INVALID:
+            bad.append("alias %r (%s): status %r" % (name, why, status))
+    if open(core.config_path()).read() != before:
+        bad.append("a refused alias changed the config")
+    status, out, err = run_cli(["--device", HFN, "alias", "loop-a"])
+    if status:
+        bad.append("setting a device's own alias again was refused: %r" % err)
+    status, out, err = run_cli(["--device", "loop-b", "info"])
+    if status != core.EXIT_DEVICE or "neither" not in err:
+        bad.append("an unknown alias: %r %r" % (status, err))
+    core.set_alias("11111-22222", "spare")                 # a device not attached
+    status, out, err = run_cli(["--device", "spare", "info"])
+    if status != core.EXIT_DEVICE or "11111-22222" not in err:
+        bad.append("the alias of a detached device: %r %r" % (status, err))
+    status, out, err = run_cli(["--device", HFN, "alias", "-"])
+    status, out, err = run_cli(["--device", HFN, "alias"])
+    if out != "-\n" or core.protected_channels(HFN) != {1}:
+        bad.append("after clearing: %r, protected %r" % (out, core.protected_channels(HFN)))
+    if run_cli(["--device", "loop-a", "info"])[0] != core.EXIT_DEVICE:
+        bad.append("a cleared alias still selects the device")
+finally:
+    discovery.attached, core.Device = real_attached, real_device
+    core.config_path = real_config
+    shutil.rmtree(tmp)
+check("aliases: unique, never serial-shaped, accepted by --device", bad)
+
 # Every write above backed up into BACKUPS, never the real data directory.
 core.data_dir = real_data_dir
 shutil.rmtree(BACKUPS)

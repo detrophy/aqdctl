@@ -929,6 +929,7 @@ def build_parser(prefix):
                    help="impulses per litre, 10-1000 (omit to read)")
     p.set_defaults(func=cmd_flow)
 
-    # ------------------------------------------------------ backup/restore
+    # ----------------------------------------------- backup, restore, alias
     core.add_backup_restore(sub, sys.modules[__name__])
+    core.add_alias(sub, prefix)
     return ap

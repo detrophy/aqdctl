@@ -289,14 +289,65 @@ def protected_channels(serial):
     return {int(c) for c in raw if str(c).isdigit() or isinstance(c, int)}
 
 
-def set_protected(serial, channels):
+def _store(serial, key, value):
+    """Set one entry of a device's config, or remove it when `value` is None."""
     cfg = load_config()
     devices = cfg.get("devices") if isinstance(cfg.get("devices"), dict) else {}
     entry = _device_config(cfg, serial)
-    entry["protected"] = sorted(channels)
+    if value is None:
+        entry.pop(key, None)
+    else:
+        entry[key] = value
     devices[serial] = entry
     cfg["devices"] = devices
     return save_config(cfg)
+
+
+def set_protected(serial, channels):
+    return _store(serial, "protected", sorted(channels))
+
+
+# A local name for a device, accepted by --device in place of its serial. It
+# starts with a letter, so it can never be read as a serial. Names stored on
+# the device are not used: two devices may carry the same ones.
+ALIAS_PATTERN = re.compile(r"[a-z][a-z0-9_-]{0,31}")
+
+
+def aliases():
+    """alias -> serial, for every device in the config."""
+    devices = load_config().get("devices")
+    if not isinstance(devices, dict):
+        return {}
+    return {entry["alias"]: serial for serial, entry in devices.items()
+            if isinstance(entry, dict) and isinstance(entry.get("alias"), str)}
+
+
+def alias_of(serial):
+    alias = _device_config(load_config(), serial).get("alias")
+    return alias if isinstance(alias, str) else None
+
+
+def set_alias(serial, alias):
+    """Give a device its alias, or take it away with None."""
+    if alias is not None:
+        if not ALIAS_PATTERN.fullmatch(alias):
+            fail(EXIT_INVALID, "%r is not an alias: up to 32 lower-case letters, digits, '-' "
+                 "and '_', starting with a letter." % alias)
+        owner = aliases().get(alias)
+        if owner not in (None, serial):
+            fail(EXIT_INVALID, "%r already stands for %s. Clear it there first:\n"
+                 "  aqdctl --device %s alias -" % (alias, owner, owner))
+    return _store(serial, "alias", alias)
+
+
+def cmd_alias(dev, args):
+    if args.name is None:
+        print(alias_of(dev.serial) or "-")
+        return
+    path = set_alias(dev.serial, None if args.name == "-" else args.name)
+    print("alias of %s %s: %s" % (dev.kind.TITLE, dev.serial,
+                                  "none" if args.name == "-" else args.name))
+    print("stored in %s" % path)
 
 
 def guard_channel(serial, channel, force):
@@ -637,6 +688,23 @@ def force_hint(dev, args):
     import shlex
     return "  aqdctl --device %s %s --force" % (dev.serial,
                                                " ".join(shlex.quote(w) for w in typed))
+
+
+def add_alias(sub, prefix):
+    p = sub.add_parser(
+        "alias", formatter_class=HelpFormatter,
+        help="a local name that --device accepts in place of the serial",
+        description="A name for this device that --device accepts in place of its "
+                    "serial, kept in the local config under the serial. Up to 32 "
+                    "lower-case letters, digits, '-' and '_', starting with a letter, "
+                    "and unique across devices. Without NAME the alias is printed, "
+                    "'-' for none; NAME '-' clears it.",
+        epilog="examples:\n"
+               "  {p} alias loop-a\n"
+               "  aqdctl --device loop-a info\n"
+               "  {p} alias -".format(p=prefix))
+    p.add_argument("name", nargs="?", metavar="NAME")
+    p.set_defaults(func=cmd_alias, needs_device=False)
 
 
 def add_backup_restore(sub, kind):

@@ -1409,6 +1409,7 @@ def build_parser(prefix):
     rgbpx.register(sub, sys.modules[__name__], prefix)
     names.register(sub, sys.modules[__name__], prefix)
 
-    # ------------------------------------------------------ backup/restore
+    # ----------------------------------------------- backup, restore, alias
     core.add_backup_restore(sub, sys.modules[__name__])
+    core.add_alias(sub, prefix)
     return ap

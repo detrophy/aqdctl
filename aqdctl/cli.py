@@ -1,9 +1,9 @@
 """The command line.
 
 'aqdctl info' lists the attached devices. Everything else names one device by
-its serial, first - 'aqdctl --device SERIAL ...' - and then uses the commands
-that device offers. The serial chooses which command tree applies, so it has to
-be known before the rest is parsed; that is why it must come first."""
+its serial or alias, first - 'aqdctl --device SERIAL ...' - and then uses the
+commands that device offers. The serial chooses which command tree applies, so
+it has to be known before the rest is parsed; that is why it must come first."""
 
 import contextlib
 import os
@@ -34,7 +34,8 @@ Supported: {supported}.
 --device comes first, and every command other than the device list needs it.
 The serial is the one Aquasuite shows, e.g. 12345-67890. It is the only way of
 telling two devices of the same kind apart that survives a reboot, and a
-command never changes more than one device.
+command never changes more than one device. 'aqdctl --device SERIAL alias NAME'
+sets a local alias that --device accepts in place of the serial.
 
 exit status
   0  done, or nothing to change
@@ -113,8 +114,17 @@ def _main(argv):
     candidates = discovery.attached()
     found = discovery.find(serial, candidates)
     if found is None:
-        _refuse("No attached device has the serial %r." % serial, candidates,
-                core.EXIT_DEVICE)
+        named, serial = serial, core.aliases().get(serial)
+        found = discovery.find(serial, candidates) if serial else None
+        if serial and not found:
+            _refuse("No attached device has the serial %s, which the alias %r "
+                    "stands for." % (serial, named), candidates, core.EXIT_DEVICE)
+        if not found:
+            if core.SERIAL_PATTERN.fullmatch(named):
+                why = "No attached device has the serial %r." % named
+            else:
+                why = "%r is neither an attached device's serial nor an alias." % named
+            _refuse(why, candidates, core.EXIT_DEVICE)
 
     ap = found.kind.build_parser("aqdctl --device %s" % serial)
     args = ap.parse_args(rest)
