@@ -1337,5 +1337,31 @@ with tempfile.TemporaryDirectory() as tmp:
         bad.append("a backup of another layout was restored: %r" % code)
 check("layout version: every capture is at 1; other versions are refused, backup excepted", bad)
 
+
+# ------------------------------------------- twelve RGB parameter words
+# +22..+45: word 11 is the last before the palette. None is used by any
+# captured controller beyond word 8, so these are written here.
+bad = []
+fake = FakeHighflow()
+base = highflow.RGB.slot_base(3)                    # the baseline's colour gradient
+before = capture("01-baseline")
+out, err, code = do(fake, "rgb set controller 3 --param 11=5")
+after = fake.blobs[core.CTRL_REPORT_ID]
+if code is not None or rgbpx.get_param(after, base, 11) != 5:
+    bad.append("--param 11=5 did not write word 11: %s" % code)
+elif changed_bytes(before, after) != {base + 22 + 2 * 11 + 1}:
+    bad.append("--param 11 touched %s" % sorted(hex(i) for i in changed_bytes(before, after)))
+elif base + 22 + 2 * 11 + 2 != base + rgbpx.RGB_COLOUR:
+    bad.append("word 11 does not end where the palette starts")
+text = io.StringIO()
+with contextlib.redirect_stdout(text):
+    rgbpx.describe_rgb(after, highflow.RGB, 3, "", highflow.source_label)
+if "unnamed11=5" not in text.getvalue():
+    bad.append("info does not show word 11:\n" + text.getvalue())
+out, err, code = do(FakeHighflow(), "rgb set controller 3 --param 12=5")
+if not code or "0-11" not in code:
+    bad.append("word 12, which would overwrite the palette, was accepted: %r" % code)
+check("RGB: all twelve parameter words are read and written, and no more", bad)
+
 print("\n%d/%d passed" % (checks - len(failures), checks))
 sys.exit(1 if failures else 0)

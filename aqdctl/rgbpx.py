@@ -37,7 +37,10 @@ RGB_MAPS = ((10, 12, 14, 15), (16, 18, 20, 21))
 # Parameters are BE16 words at +22+2k. Values below 256 decode identically
 # under a LE16-at-+23 reading, so only an effect with a large value (colour
 # gradient, limits up to 1000) distinguishes them - that capture settled it.
+# There are twelve of them, +22..+45, filling the slot up to the palette at +46.
+# No controller in the captures uses words 9-11, but an effect may.
 RGB_PARAM = 22
+RGB_PARAM_WORDS = 12
 # The colour at +46 is HSV, not the Farbwerk 360's A/G/R/B palette: hue is a
 # BE16 over 0..1535 (six 256-step sectors), then saturation and value as bytes.
 # Aquasuite's picker works in HSV as well, so what it shows as
@@ -427,7 +430,7 @@ def describe_rgb(buf, layout, index, name, source_label):
     # 'count' is the length of the colour list, shown with the colours instead.
     labels = RGB_PARAM_NAMES.get(mode, [])
     shown = []
-    for k in range(9):
+    for k in range(RGB_PARAM_WORDS):
         value = get_param(buf, base, k)
         label = labels[k] if k < len(labels) else ""
         if label == RGB_COUNT_PARAM:
@@ -649,8 +652,8 @@ def _apply_settings(dev, buf, after, base, args):
                          % (RGB_MODES.get(mode, "%#04x" % mode), key,
                             ", ".join(n for n in labels if n and n != RGB_COUNT_PARAM)
                             or "none"))
-        if not 0 <= k < 9:
-            sys.exit("Parameter index must be 0-8.")
+        if not 0 <= k < RGB_PARAM_WORDS:
+            sys.exit("Parameter index must be 0-%d." % (RGB_PARAM_WORDS - 1))
         try:
             value = int(raw)
         except ValueError:
