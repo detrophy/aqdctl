@@ -1,15 +1,15 @@
 """A device kept open for another program, over JSON lines.
 
-'serve' reads one JSON request per line on stdin and answers each with one
-JSON line on stdout; everything else it prints goes to stderr. A program that
-shows the device - a GUI, say - starts it as a child process and keeps it
-running, so it runs with the same access as any other aqdctl command.
+One JSON request per line on stdin gets one JSON answer per line on stdout;
+all other output goes to stderr. A program that displays the device, such as
+a GUI, starts serve as a child process and keeps it running; serve then has
+the same device access as any other aqdctl command.
 
-Requests, each with an optional "id" that the answer repeats:
+A request can carry an "id", which is copied into its answer:
 
   {"op": "get", "keys": [PREFIX, ...]}          the values, as get --json
   {"op": "schema", "keys": [PREFIX, ...]}       the keys, as get --keys --json
-  {"op": "apply", "lines": [LINE, ...],         lines as a batch takes them
+  {"op": "apply", "lines": [LINE, ...],         lines in batch format
    "dry_run": false, "force": false}
   {"op": "save"}                                send a pending save now
   {"op": "close"}                               save, then end
@@ -18,9 +18,9 @@ An answer is {"id", "ok": true, ...} or {"id", "ok": false, "error":
 {"status", "message"}}, with the statuses of the command line.
 
 A settings write takes effect at once. The save command follows 3.8 s after
-the last write, each write restarting the wait, as Aquasuite does; a slider moved through twenty steps is written twenty times and saved
-once. A pending save is sent at once on close, at the end of stdin and on
-SIGTERM. Each report is backed up once per session, before its first write."""
+the last write, each write restarting the wait, as Aquasuite does. A pending
+save is sent at once on close, at the end of stdin and on SIGTERM. Each
+report is backed up once per session, before its first write."""
 
 import argparse
 import contextlib
@@ -119,7 +119,7 @@ class Session:
     def _apply(self, request):
         lines = request.get("lines")
         if not isinstance(lines, list) or not all(isinstance(l, str) for l in lines):
-            core.fail(core.EXIT_USAGE, "lines is a list of lines as a batch takes them.")
+            core.fail(core.EXIT_USAGE, "lines is a list of batch lines.")
         args = argparse.Namespace(force=bool(request.get("force")),
                                   dry_run=bool(request.get("dry_run")), yes=True,
                                   verbose=False, backup=None, typed=None)

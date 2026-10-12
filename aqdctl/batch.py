@@ -1,13 +1,13 @@
 """Many changes, one write.
 
-'batch' takes key=value lines, the keys 'get' prints, and command lines, as
-typed after --device. Each key=value line becomes the command that sets its
-key. Every command runs as it would on its own, with the same checks - but
-against a copy of the device's reports instead of the device. Lines run in
-the order given; key=value lines that follow each other run together.
-When every line has run, the device's safety checks look at all the changes
-together, and each changed report is written once: one backup, one
-confirmation, one write, one save. A line that fails writes nothing at all.
+A batch holds key=value lines, with the keys 'get' prints, and command lines,
+as typed after --device. Each key=value line becomes the command that sets its
+key. Every command runs with the checks it has on its own, against a copy of
+the device's reports instead of the device. Lines run in the order given;
+consecutive key=value lines run together. After the last line, the device's
+safety checks run once on all the changes together, and each changed report
+is written once, with one backup each, after one confirmation. If a line
+fails, nothing is written.
 
 A key whose value is the device's current one is left alone, and read-only
 keys are skipped, so a batch made by 'get' changes nothing on the device it
@@ -195,7 +195,7 @@ def _fan_mode(channel, values, current, lines):
     """The 'fan set N mode' commands for a channel's mode settings. A setting
     of a mode other than the one the channel ends in goes through its own mode
     first; the last command sets the final mode. All of it lands in the
-    batch's copy, so the device only ever sees the end result."""
+    batch's copy, so only the end result is written to the device."""
     p = "fan.%s." % channel
     final = values.get("mode", current[p + "mode"])
     if final not in FAN_MODES:
@@ -403,7 +403,7 @@ def _keys(kind, dev, staged, parser, lines, protect, args):
 
 def _unknown(kind, dev, staged, current, line):
     """The key of a line that names no current settable key: one that a
-    controller's new effect brings, or else an error saying why not."""
+    controller's new effect brings, or else an error with the reason."""
     m = re.match(r"(rgb\.controller\.\d+)\.", line.key)
     if m and m.group(1) + ".pos" in current:
         for entry in kind.key_table():
@@ -493,9 +493,9 @@ def register(sub, prefix):
         description="Apply the lines of FILE: key=value lines as 'get' prints them, and "
                     "commands as typed after --device, such as 'rgb create ...'. Blank "
                     "lines and lines starting with # are skipped. Lines run in order, "
-                    "each with the checks of its command; the safety checks then judge "
-                    "all changes together. The device is written once, and only if "
-                    "every line succeeds. Keys that already hold their value, and "
+                    "each with the checks of its command; the safety checks then run "
+                    "once on all changes together. The device is written once, and only "
+                    "if every line succeeds. Keys that already hold their value, and "
                     "read-only keys, are left alone. Write flags go on the batch, not on "
                     "its lines. FILE '-' reads stdin and needs -y or -n.",
         epilog="examples:\n"

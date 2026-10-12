@@ -178,7 +178,7 @@ def source_label(index):
 
 
 def source_short(index):
-    """A data source as --sensor takes it."""
+    """A data source as typed after --sensor."""
     return "#%d" % index
 
 
@@ -1241,6 +1241,8 @@ examples
   {p} sensor offset internal -0.5
   {p} rgb create 2 pos 1-10 --effect static --colour 0000FF
   {p} name sensor internal "Cold Point"
+  {p} get alarm.flow
+  {p} batch settings.txt -n
 
 Every write is preceded by an automatic backup into
 <your home>/.local/share/aqdctl/ (correct under sudo).""".format(p=prefix)

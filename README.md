@@ -20,8 +20,9 @@ This project is not affiliated with Aqua Computer GmbH & Co. KG.
 | high flow NEXT | `0c70:f012` | Supported.                                                   |
 
 aqdctl sends the same reports as Aquasuite, of the same types and in the
-same order; USB captures of Aquasuite confirm this. Only the delay before the
-final report differs: aqdctl waits 0.2 s, Aquasuite about 3.8 s. The Octo
+same order; USB captures of Aquasuite confirm this. The one difference is
+when the save command follows a settings write: 0.2 s after it for a single
+command, 3.8 s after the last change for Aquasuite and for `serve`. The Octo
 support has been used on real hardware; the high flow NEXT's commands are so
 far only checked against the captures.
 
@@ -34,8 +35,8 @@ far only checked against the captures.
   run aqdctl as root,
   or use the udev helper `aqdctl --help-udev` for root-less access.
 - Optional:
-  For the Octo `aquacomputer_d5next` used with `info` command for live fan speeds, 
-  temperatures and flow.
+  For the Octo `aquacomputer_d5next` used with the `info` and `get` commands
+  for live fan speeds, temperatures and flow.
   For the high flow NEXT the kernel driver is only a fallback,
   live readings come from the report the device sends every second.
 
@@ -56,8 +57,10 @@ Without a device:
 
 ```
 aqdctl info                     list the attached devices and their serials
+aqdctl list [--json]            the same for scripts: serial, type, alias
 aqdctl --help-udev              udev rule for root-less access
 aqdctl --device SERIAL --help   the commands that device offers
+aqdctl --api                    the version of the key names, see Scripts
 ```
 
 ### Supported commands
@@ -68,8 +71,12 @@ Both devices:
 aqdctl --device SERIAL info [SECTION]       configuration and live readings
                        rgb ...              RGB channels 1-2
                        name ...             names stored on the device
-                       backup [-o FILE]     save the raw reports to a file
-                       restore FILE         write a saved report back to the device
+                       backup [-o PREFIX]   save both reports to files
+                       restore FILE [FILE]  write saved reports back to the device
+                       get [PREFIX...]      settings and readings as key=value
+                       batch FILE|-         many changes, one write
+                       serve                JSON requests on stdin, for programs
+                       alias [NAME|-]       a local name in place of the serial
 ```
 
 Octo:
@@ -128,9 +135,10 @@ Write flags, accepted by every command that changes something:
 -n, --dry-run     read the device, print what would change, write nothing
 -v, --verbose     also print the changed bytes
 -y, --yes         skip the confirmation question
+-q, --quiet       print nothing on success; errors still go to stderr
 --backup FILE     where to put the automatic pre-write backup
---force           go past a refusal: a protected channel, a backup from
-                  another device, or a high flow NEXT safety check
+--force           go past a refusal: a protected channel or a high flow NEXT
+                  safety check
 ```
 
 Reading, on both devices:
@@ -403,12 +411,21 @@ high flow NEXT groups  controller 1-8, virtual 1-8, and sensor with the names
 Backup and restore (both devices):
 
 ```
-backup [-o FILE]                    write both feature reports to disk, byte for
+backup [-o PREFIX]                  write both feature reports to disk, byte for
                                     byte. Without -o they go to
                                     ~/.local/share/aqdctl/ with the device's
-                                    type and serial in the name.
-restore FILE                        write a saved report back
+                                    type, serial and the time in the name. With
+                                    -o: PREFIX-SERIAL-03.bin (settings) and
+                                    PREFIX-SERIAL-08.bin (names), replacing
+                                    earlier ones.
+restore FILE [FILE] [--other-device]
+                                    write a settings dump, a names dump, or one
+                                    of each back, after one confirmation
+    --other-device                  restore a dump of another device, or one
+                                    whose name holds no serial
 ```
+
+Restoring only the settings file switches the settings and keeps the names.
 
 Examples (Octo):
 
@@ -431,6 +448,120 @@ aqdctl --device SERIAL display pages 2,3,13
                        rgb create 2 pos 1-10 --effect static --colour 0000FF
                        name sensor internal "Cold Point"
 ```
+
+## Scripts
+
+Exit statuses:
+
+```
+0  done, or nothing to change
+1  a value or file aqdctl will not use
+2  usage: the command line itself
+3  device missing, unreadable, of an unknown layout, or busy with another aqdctl
+4  refused: a safety check or a protected channel (--force would pass), or
+   another device's dump (restore --other-device would)
+5  written, but the device reads back other values
+6  not confirmed: answered no, or no terminal and no -y
+```
+
+Devices:
+
+```
+aqdctl list [--json]                one line per attached device: serial, type,
+                                    and alias or -. Needs no device access.
+aqdctl --device SERIAL alias [NAME|-]
+                                    a local name, usable with --device in place
+                                    of the serial; - removes it. Lower-case
+                                    letters, digits, - and _, starting with a
+                                    letter, and unique.
+```
+
+Reading:
+
+```
+get [PREFIX...] [--value] [--json] [--keys]
+                                    keys as key=value lines, nothing else on
+                                    stdout. A PREFIX selects by whole dotted
+                                    parts: 'get live', 'get alarm.flow'.
+    --value                         the values only, one per line
+    --json                          a JSON object; with --value an array
+    --keys                          the keys instead: type, unit, rw or ro,
+                                    range or choices
+```
+
+A settable key is named after the command that sets it (`display.brightness`,
+`fan.3.limits.min`), and its value has the form that command uses. Read-only
+keys are `device.*`, `live.*` and a few RGB fields. An empty value is a
+missing reading. Only the reports the selected keys need are read; the Octo's
+`live.*` keys come from the kernel driver and need no device access.
+
+The key lists are in `tests/keys-highflow.txt` and `tests/keys-octo.txt`.
+`aqdctl --api` prints their version, which goes up when a key is renamed or
+removed, or its value written differently.
+
+Writing:
+
+```
+batch FILE|- [write flags] [--json]
+                                    key=value lines as get prints them, and
+                                    command lines as typed after --device,
+                                    e.g. 'rgb create ...'. Lines starting with
+                                    # are skipped.
+```
+
+- Lines run in order, each with the checks of its command. The safety
+  checks then run once on all changes together.
+- Each changed report is written once, with its own backup, after one
+  confirmation for all of them. A failing line stops the batch before
+  anything is written; the error message includes the line number.
+- Keys that already hold their value, and read-only keys, are skipped:
+  `get > FILE` followed by `batch FILE` changes nothing.
+- Not in a batch: write flags on a line, commands that only read, `restore`,
+  `volume reset`, and `fan set CH protect` (the key `fan.CH.protect` is).
+- `-` reads stdin and needs `-y` or `-n`. `--json` prints
+  `{"changes": [{"key", "old", "new"}], "written"}`, or
+  `{"error": {"status", "message"}}`.
+
+```
+aqdctl --device loop-a batch - -y <<'EOF'
+display.brightness=low
+alarm.flow.limit=60
+rgb create 2 pos 1-10 --effect static --colour 0000FF
+EOF
+```
+
+Profiles:
+
+```
+aqdctl --device loop-a backup -o gaming
+aqdctl --device loop-a restore gaming-SERIAL-03.bin -y -q
+```
+
+Programs:
+
+```
+serve                               keep the device open and answer JSON
+                                    requests, one per line on stdin, one
+                                    answer per line on stdout
+```
+
+The first line out is `{"serve": API, "serial", "type"}`. A request can carry
+an `"id"`, which is copied into its answer:
+
+```
+{"op": "get", "keys": [PREFIX, ...]}      the values, as get --json
+{"op": "schema", "keys": [PREFIX, ...]}   the keys, as get --keys --json
+{"op": "apply", "lines": [LINE, ...],     batch lines; "dry_run" and "force"
+ "dry_run": false, "force": false}        are optional
+{"op": "save"}                            send a pending save now
+{"op": "close"}                           save, then end
+```
+
+An answer is `{"id", "ok": true, ...}` or `{"id", "ok": false, "error":
+{"status", "message"}}`. A write takes effect at once; the save follows 3.8 s
+after the last settings write, each write restarting the wait. A pending save
+is sent on `close`, at the end of stdin and on SIGTERM. Each report is backed
+up once per session. Other aqdctl commands can write between requests.
 
 ## Before writes
 
@@ -465,12 +596,17 @@ a refusal prints the reason. Commands that require `--force` flag:
 
 `volume reset` can't be undone, so it always asks; `-y` does not skip that.
 
-To create a standalone backup, use `aqdctl --device SERIAL backup -o FILE`.
+One aqdctl at a time writes a device; a second one waits up to 10 s, then
+exits with status 3.
 
-`aqdctl --device SERIAL restore FILE` restores a backup. 
-Files checksum and device serial are verified first, restoring a settings report 
-is refused while any channel is protected. Restoring provides the same 
-safety checks as the commands; adding `--force` flag will ignore all safety measures.
+To create a standalone backup, use `aqdctl --device SERIAL backup -o PREFIX`.
+
+`aqdctl --device SERIAL restore FILE [FILE]` restores a backup.
+Checksums and the device serial in the file name are verified first; a dump
+of another device needs `--other-device`. A settings dump that changes a
+protected channel is refused. Restoring runs the same safety checks as the
+commands; adding the `--force` flag goes past them and past channel
+protection.
 
 Reports, as Aquasuite uses them:
 
@@ -489,7 +625,7 @@ The vendor-specific bulk interface is unused.
 | Path                                              | Contents |
 |---------------------------------------------------|----------|
 | `aqdctl.py`                                       | Entry script: `python3 aqdctl.py --device SERIAL ...`. |
-| `aqdctl/`                                         | The tool. `octo.py` and `highflow.py` are the field maps, with the evidence for each field; `core.py`, `rgbpx.py`, `names.py`, `discovery.py` and `cli.py` are shared by both devices. |
+| `aqdctl/`                                         | The tool. `octo.py` and `highflow.py` are the field maps, with the evidence for each field, and their key tables; `core.py`, `rgbpx.py`, `names.py`, `discovery.py` and `cli.py` are shared by both devices; `keys.py`, `batch.py` and `serve.py` are `get`, `batch` and `serve`. |
 | `octo/`                                           | Octo report captures, numbered in the order taken ([README](octo/README.md)). |
 | `highflow/`                                       | high flow NEXT captures, and [`LAYOUT.md`](highflow/LAYOUT.md), the report map. |
 | `usb-captures/`                                   | USB captures of Aquasuite writing to both devices ([README](usb-captures/README.md)). |
@@ -497,6 +633,7 @@ The vendor-specific bulk interface is unused.
 | `probe_modes.py`                                  | Writes candidate RGB effect ids to one controller to find out which ones the firmware accepts, then restores the controller. |
 | `tests/test_octo.py`                              | Runs every Octo command against the captures, no hardware needed: `python3 tests/test_octo.py`. |
 | `tests/test_highflow.py`                          | The same for the high flow NEXT, and replays each capture's change: `python3 tests/test_highflow.py`. |
+| `tests/keys-*.txt`                                | The key names `get` prints, per device; the tests fail when one changes. |
 
 ## Contributing captures
 
@@ -507,7 +644,7 @@ welcome.
   what.
 - Name captures `NN-description`, numbered in the order taken. Git does not
   keep file times, each capture is compared with the one before it.
-- For supported devices, `aqdctl --device SERIAL backup -o FILE` saves both reports.
+- For supported devices, `aqdctl --device SERIAL backup -o PREFIX` saves both reports.
 - Before sharing, remove identifying data:
   - The live report 0x01 carries the device's serial number at bytes
     0x03-0x06. `probe_highflow.py --input` logs and USB captures contain it;

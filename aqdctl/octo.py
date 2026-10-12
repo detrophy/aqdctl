@@ -677,7 +677,7 @@ MODE_WORDS = {MODE_MANUAL: "fixed", MODE_TARGET: "target", MODE_CURVE: "curve"}
 
 
 def _mode_word(value):
-    """A channel's mode as 'fan set N mode' takes it."""
+    """A channel's mode as typed after 'fan set N mode'."""
     return "follow" if is_linked(value) else keys.named(MODE_WORDS, value)
 
 
@@ -766,7 +766,7 @@ def key_table():
 INFO_NOTES = """\
 fan: 'setpoint' is the stored fixed power. It is what hwmon pwmN reads, and
   it is only what the channel runs at in fixed mode. 'sensor' is the number
-  --sensor takes. 'fan set CH mode curve' prints a channel's full curve, and
+  to give --sensor. 'fan set CH mode curve' prints a channel's full curve, and
   'fan set CH max-rpm' its bar-graph maximum.
 sensor: offsets are stored on the device and survive a reboot; the readings
   already include them.
@@ -855,6 +855,8 @@ examples
   {p} rgb create 2 pos 1-15 --effect static --colour FF0000
   {p} rgb set controller 7 --colour 00FF00
   {p} name fan 3 "Front Rad"
+  {p} get alarm.flow
+  {p} batch settings.txt -n
 
 Every write is preceded by an automatic backup into
 <your home>/.local/share/aqdctl/ (correct under sudo).""".format(p=prefix)

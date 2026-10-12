@@ -530,7 +530,7 @@ rgb: the number in front of a controller is its own: Aquasuite shows it as
 # -------------------------------------------------------------------- keys
 
 def effect_word(mode):
-    """An effect as --effect takes it: its name with underscores, or its id."""
+    """An effect as typed after --effect: its name with underscores, or its id."""
     name = RGB_MODES.get(mode)
     return name.replace(" ", "_") if name else "%#04x" % mode
 

@@ -34,6 +34,7 @@ Supported: {supported}.
   aqdctl list                     the same for scripts: serial, type, alias
   aqdctl --device SERIAL --help   the commands that device offers
   aqdctl --device SERIAL info     its settings and live readings
+  aqdctl --device SERIAL get      the same as key=value lines, for scripts
   aqdctl --api                    the version of the key names of get, batch
                                   and serve; it goes up when one is renamed
 
@@ -41,14 +42,16 @@ Supported: {supported}.
 The serial is the one Aquasuite shows, e.g. 12345-67890. It is the only way of
 telling two devices of the same kind apart that survives a reboot, and a
 command never changes more than one device. 'aqdctl --device SERIAL alias NAME'
-sets a local alias that --device accepts in place of the serial.
+sets a local alias, usable with --device in place of the serial.
 
 exit status
   0  done, or nothing to change
   1  a value or file aqdctl will not use
   2  usage: the command line itself
-  3  device missing, unreadable, or of an unknown layout
-  4  refused by a safety check or a protected channel; --force would pass
+  3  device missing, unreadable, of an unknown layout, or busy with
+     another aqdctl
+  4  refused: a safety check or a protected channel (--force would pass),
+     or another device's dump (restore --other-device would)
   5  written, but the device reads back other values
   6  not confirmed: answered no, or no terminal and no -y""".format(supported=_supported())
 

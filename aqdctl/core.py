@@ -644,8 +644,8 @@ def store(dev, after, save=True):
 
 
 def profile_path(prefix, dev, rid):
-    """PREFIX-SERIAL-RR.bin: what 'backup -o PREFIX' writes, named so that
-    'restore' knows which device and report it holds."""
+    """PREFIX-SERIAL-RR.bin: what 'backup -o PREFIX' writes. The name records
+    which device and report the file holds, for 'restore' to check."""
     if prefix.endswith(".bin"):
         prefix = prefix[:-len(".bin")]
     return "%s-%s-%02x.bin" % (prefix, dev.serial, rid)
@@ -714,7 +714,7 @@ def protected_changes(dev, before, after):
 
 def cmd_restore(dev, args):
     if len(args.files) > 2:
-        fail(EXIT_USAGE, "restore takes a settings dump, a names dump, or one of each.")
+        fail(EXIT_USAGE, "Give restore a settings dump, a names dump, or one of each.")
     dumps = {}
     for path in args.files:
         saved = _load_dump(dev, path)
@@ -853,8 +853,8 @@ def force_hint(dev, args):
 def add_alias(sub, prefix):
     p = sub.add_parser(
         "alias", formatter_class=HelpFormatter,
-        help="a local name that --device accepts in place of the serial",
-        description="A name for this device that --device accepts in place of its "
+        help="a local name, usable with --device in place of the serial",
+        description="A name for this device, usable with --device in place of its "
                     "serial, kept in the local config under the serial. Up to 32 "
                     "lower-case letters, digits, '-' and '_', starting with a letter, "
                     "and unique across devices. Without NAME the alias is printed, "

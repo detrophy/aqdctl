@@ -1,9 +1,9 @@
 """Dotted keys: every value aqdctl reads from a device, under a stable name.
 
 A settable key is named after the command that sets it - display.brightness is
-what 'display brightness' sets - and its value is written the way that command
-takes it. Read-only keys (device.*, live.*) have no command. No key is the prefix of another, so a full key always
-selects exactly one value.
+what 'display brightness' sets - and its value has the form that command
+uses. Read-only keys (device.*, live.*) have no command. No key is the prefix
+of another, so a full key always selects exactly one value.
 
 The names are the contract scripts and other tools build on: renaming one
 changes that contract."""
@@ -17,7 +17,7 @@ from . import core
 API_VERSION = 1
 
 # Where a key's value comes from. Only the sources a request needs are read.
-IDENTITY = "identity"       # what discovery already knows: serial and type
+IDENTITY = "identity"       # what discovery already found: serial and type
 SETTINGS = "settings"       # feature report 0x03
 NAMES = "names"             # feature report 0x08
 LIVE = "live"               # the live readings
@@ -31,8 +31,8 @@ class Key:
 
     type is one of: on/off, choice, integer, number, numbers (a list), points
     (TEMP:POWER pairs), colour, colours, leds (FIRST-LAST), source (a data
-    source as --sensor takes it), text. fmt formats one number. choices lists
-    the values a choice takes, and for integer and number the words allowed
+    source as typed after --sensor), text. fmt formats one number. choices
+    lists the values of a choice, and for integer and number the words allowed
     besides a number ('off'). low and high bound a number."""
 
     def __init__(self, name, source, read, type="number", unit="", fmt="%g",
@@ -63,7 +63,7 @@ class Key:
     def json(self, value):
         """The value as JSON: numbers as numbers, on/off as a boolean, lists
         as arrays, a missing reading as null. Numbers carry the precision the
-        text form has, so both say the same."""
+        text form has, so both hold the same value."""
         if value is None or isinstance(value, str):
             return value
         if self.type in ("number", "integer"):
