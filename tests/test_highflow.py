@@ -1244,5 +1244,31 @@ if bare["flow"] != 206.0:
     bad.append("without settings the driver's flow is not passed through")
 check("kernel driver fallback: its flow is the raw one, calibrated from the settings", bad)
 
+# a calibration change moves the flow the flow alarm sees
+bad = []
+armed = bytearray(capture("01-baseline"))           # the live flow is 206.5 l/h
+armed[highflow.ALARM_ENABLE] |= 0x01
+core.put_be16(armed, highflow.ALARM_BY_KEY["flow"].offset, 2000)   # alarm below 200 l/h
+for line, refused, why in (
+        ("flow calibration --corrections 0,0,0,0,0,0,0,-5,-5,0", True,
+         "-5 % at 200 and 250 l/h puts 206.5 l/h at 196.2"),
+        ("flow calibration --corrections 0,0,0,0,0,0,0,1,1,0", False, "it rises"),
+        ("flow calibration --points 20,30,50,70,100,125,150,200,205,300", False,
+         "moving a rate with no corrections changes nothing"),
+        ("flow calibration --corrections 0,0,0,0,0,0,0,-5,-5,0 --force", False, "forced")):
+    fake = FakeHighflow()
+    fake.blobs[core.CTRL_REPORT_ID] = bytearray(armed)
+    out, err, code = do(fake, line)
+    if refused and (code is None or fake.written):
+        bad.append("%r was not refused (%s)" % (line, why))
+    if not refused and (code is not None or not fake.written):
+        bad.append("%r was refused (%s): %s" % (line, why, code))
+fake = FakeHighflow()
+fake.blobs[core.CTRL_REPORT_ID] = bytearray(armed)
+out, err, code = do(fake, "flow calibration --corrections 0,0,0,0,0,0,0,-5,-5,0")
+if not code or "196" not in code:
+    bad.append("the refusal does not give the flow the alarm would see: %r" % code)
+check("flow alarm: a calibration change that crosses its limit is refused", bad)
+
 print("\n%d/%d passed" % (checks - len(failures), checks))
 sys.exit(1 if failures else 0)

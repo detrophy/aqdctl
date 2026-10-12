@@ -258,7 +258,9 @@ flow calibration [--points P1,...,P10] [--corrections C1,...,C10]
                                         and 300.
                                         Corrections are percentages, -50 to
                                         +50, interpolated between the rates.
-                                        The flow alarm sees the corrected flow.
+                                        The flow alarm sees the corrected flow,
+                                        so a change that would make an enabled
+                                        flow alarm fire is refused.
 ```
 
 Sensors (high flow NEXT):

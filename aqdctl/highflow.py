@@ -657,9 +657,15 @@ def _signal_guard(dev, before, after, args):
     _refuse_or_note(dev, args, text, "Changing this requires --force:")
 
 
+_CALIBRATION_BYTES = slice(CALIBRATION, CALIBRATION_POINTS + 2 * CALIBRATION_COUNT)
+
+
 def _predicted(alarm, live, before, after):
     """The reading the alarm will see once `after` is written: the live one,
-    moved by any change to the offset or water-quality points it depends on."""
+    moved by any change to the offset, water-quality points or flow
+    calibration it depends on."""
+    if alarm.key == "flow" and before[_CALIBRATION_BYTES] != after[_CALIBRATION_BYTES]:
+        return calibrated_flow(live.get("flow_raw"), after)
     reading = live.get(alarm.live_key)
     if reading is None:
         return None
@@ -689,7 +695,9 @@ def _alarm_guard(dev, before, after, args):
         moved = (be16(before, alarm.offset) != be16(after, alarm.offset)
                  or (alarm.key in offsets and core.sbe16(before, offsets[alarm.key])
                      != core.sbe16(after, offsets[alarm.key]))
-                 or (alarm.key == "water-quality" and before[points] != after[points]))
+                 or (alarm.key == "water-quality" and before[points] != after[points])
+                 or (alarm.key == "flow"
+                     and before[_CALIBRATION_BYTES] != after[_CALIBRATION_BYTES]))
         if (on and not was_on) or moved:
             candidates.append((alarm, on))
     if not candidates:
@@ -703,7 +711,10 @@ def _alarm_guard(dev, before, after, args):
         if crossed is False:
             continue
         shown = (alarm.fmt % limit) + " " + alarm.unit
-        if reading is None:
+        if reading is None and alarm.key == "flow" and live.get("flow_raw") is not None:
+            why = ("the flow of %.1f l/h lies outside the new calibration table, so "
+                   "what the device will read there is not known" % live["flow_raw"])
+        elif reading is None:
             why = ("no live readings are available" if not live
                    else "the %s sensor reads nothing" % alarm.key)
         else:
@@ -1228,13 +1239,14 @@ def build_parser(prefix):
                     "correction, in percent, applied at each of them; between two "
                     "rates the correction is interpolated. Both are settable, ten "
                     "values at a time; with neither flag the table is printed. "
-                    "The flow alarm sees the corrected flow.",
+                    "The flow alarm sees the corrected flow, so a change that "
+                    "would make an enabled flow alarm fire is refused.",
         epilog="The factory rates are 20,30,50,70,100,125,150,200,250,300 l/h.\n\n"
                "examples:\n"
                "  {p} flow calibration\n"
                "  {p} flow calibration --corrections -1,1,1,0,0,0,0,0,0,0\n"
                "  {p} flow calibration --points 20,31,51,70,99,124,149,202,248,300"
-               .format(p=prefix)))
+               .format(p=prefix)), force="write although it makes an alarm fire")
     p.add_argument("--points", metavar="P1,...,P10",
                    help="the ten flow rates in l/h, %g-%g and rising"
                         % (POINT_MIN, POINT_MAX))
