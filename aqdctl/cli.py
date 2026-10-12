@@ -32,7 +32,16 @@ Supported: {supported}.
 --device comes first, and every command other than the device list needs it.
 The serial is the one Aquasuite shows, e.g. 12345-67890. It is the only way of
 telling two devices of the same kind apart that survives a reboot, and a
-command never changes more than one device.""".format(supported=_supported())
+command never changes more than one device.
+
+exit status
+  0  done, or nothing to change
+  1  a value or file aqdctl will not use
+  2  usage: the command line itself
+  3  device missing, unreadable, or of an unknown layout
+  4  refused by a safety check or a protected channel; --force would pass
+  5  written, but the device reads back other values
+  6  not confirmed: answered no, or no terminal and no -y""".format(supported=_supported())
 
 
 def udev_help():
@@ -55,24 +64,34 @@ def _take_device(argv):
     head = argv[0]
     if head == "--device":
         if len(argv) < 2:
-            sys.exit("--device needs a serial, e.g. --device 12345-67890. "
-                     "'aqdctl info' lists them.")
+            core.fail(core.EXIT_USAGE, "--device needs a serial, e.g. --device 12345-67890. "
+                      "'aqdctl info' lists them.")
         return argv[1], argv[2:]
     if head.startswith("--device="):
         return head.split("=", 1)[1], argv[1:]
     if any(a == "--device" or a.startswith("--device=") for a in argv):
-        sys.exit("--device must come first: aqdctl --device SERIAL COMMAND ...")
+        core.fail(core.EXIT_USAGE, "--device must come first: aqdctl --device SERIAL COMMAND ...")
     return None, argv
 
 
-def _refuse(message, found):
+def _refuse(message, found, status):
     print(message, file=sys.stderr)
     print(file=sys.stderr)
     discovery.list_devices(found, out=sys.stderr)
-    sys.exit(2)
+    sys.exit(status)
 
 
 def main(argv=None):
+    """The command line. A Failure ends it with its own status, its message on
+    stderr like any other refusal."""
+    try:
+        _main(argv)
+    except core.Failure as failure:
+        print(failure.message, file=sys.stderr)
+        sys.exit(failure.code)
+
+
+def _main(argv):
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv or argv[0] in ("-h", "--help"):
         print(general_help())
@@ -87,11 +106,13 @@ def main(argv=None):
     serial, rest = _take_device(argv)
     if serial is None:
         _refuse("A device is required, and --device must come first:\n"
-                "  aqdctl --device SERIAL %s" % " ".join(argv), discovery.attached())
+                "  aqdctl --device SERIAL %s" % " ".join(argv), discovery.attached(),
+                core.EXIT_USAGE)
     candidates = discovery.attached()
     found = discovery.find(serial, candidates)
     if found is None:
-        _refuse("No attached device has the serial %r." % serial, candidates)
+        _refuse("No attached device has the serial %r." % serial, candidates,
+                core.EXIT_DEVICE)
 
     ap = found.kind.build_parser("aqdctl --device %s" % serial)
     args = ap.parse_args(rest)

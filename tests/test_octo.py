@@ -30,7 +30,8 @@ BLOBS = {m.CTRL_REPORT_ID: open(os.path.join(FIX, "03-rgb-controllers-8-to-10-ef
 
 
 class FakeOcto:
-    """Serves captured reports; records writes instead of sending them."""
+    """Serves captured reports; records writes and keeps them, as a device that
+    accepts them does, so the read-back after a write verifies."""
     kind, serial = octo, SERIAL
     def __init__(self, ctrl=None):
         self.written, self.blobs = [], dict(BLOBS)
@@ -45,6 +46,7 @@ class FakeOcto:
         stored, computed = m.report_crc(buf)
         assert stored == computed, "wrote a report with a stale checksum"
         self.written.append(bytes(buf))
+        self.blobs[buf[0]] = bytes(buf)
 
 
 def _quiet(fn, args):
@@ -1249,6 +1251,29 @@ if bad:
 else:
     print("  ok    starting the tool: aqdctl.py, -m aqdctl and the aqdctl directory")
 
-total = len(CASES) + 41
+# a protected channel refuses with the status scripts can tell apart
+bad = []
+with tempfile.TemporaryDirectory() as tmp:
+    real_config = core.config_path
+    core.config_path = lambda: os.path.join(tmp, "config.json")
+    try:
+        core.set_protected(SERIAL, {1})
+        try:
+            core.guard_channel(SERIAL, 1, False)
+            bad.append("channel 1 was not refused")
+        except SystemExit as exc:
+            if exc.code != core.EXIT_REFUSED or "protected" not in str(exc):
+                bad.append("status %r: %s" % (exc.code, exc))
+        core.guard_channel(SERIAL, 1, True)          # --force passes
+        core.guard_channel(SERIAL, 2, False)         # another channel passes
+    finally:
+        core.config_path = real_config
+if bad:
+    failures.append(("protected channel status", "; ".join(bad)))
+    print("  FAIL  protected channel status: %s" % "; ".join(bad))
+else:
+    print("  ok    protected channel: refused with status 4, --force passes")
+
+total = len(CASES) + 42
 print("\n%d/%d passed" % (total - len(failures), total))
 sys.exit(1 if failures else 0)

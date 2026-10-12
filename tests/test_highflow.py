@@ -451,24 +451,37 @@ PREFIX = "aqdctl --device %s" % SERIAL
 PARSER = highflow.build_parser(PREFIX)
 
 
+class Refusal(str):
+    """A refusal's message, carrying the exit status it would end with."""
+    def __new__(cls, message, status):
+        obj = str.__new__(cls, message)
+        obj.status = status
+        return obj
+
+
 def do(fake, line, answer="y"):
     """Run one command line against a fake device, as cli.main does once it
     has chosen the device. Returns (stdout, stderr, exit), exit being the
-    refusal message, or None if the command ran through."""
+    refusal message - a Refusal, with its .status - or None if the command ran
+    through. `answer` is what the confirmation gets; the question is written
+    to stdout so tests can see where it came."""
     argv = shlex.split(line)
     args = PARSER.parse_args(argv)
     args.typed = argv
     out, err = io.StringIO(), io.StringIO()
-    real_input = builtins.input
-    builtins.input = lambda prompt="": (out.write(prompt), answer)[1]
+    real_confirm = core.confirm
+    core.confirm = lambda question, notice=None, hint=None: (
+        out.write(question + " [y/N] "), answer.strip().lower() in ("y", "yes"))[1]
     try:
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             args.func(fake, args)
         code = None
+    except core.Failure as exc:
+        code = Refusal(exc.message, exc.code)
     except SystemExit as exc:
-        code = exc.code if exc.code else None
+        code = Refusal(exc.code, core.EXIT_INVALID) if exc.code else None
     finally:
-        builtins.input = real_input
+        core.confirm = real_confirm
     return out.getvalue(), err.getvalue(), code
 
 
@@ -1362,6 +1375,96 @@ out, err, code = do(FakeHighflow(), "rgb set controller 3 --param 12=5")
 if not code or "0-11" not in code:
     bad.append("word 12, which would overwrite the palette, was accepted: %r" % code)
 check("RGB: all twelve parameter words are read and written, and no more", bad)
+
+
+# ---------------------------------------------- exit statuses and -q, -y
+# Scripts branch on the status, so each class of outcome has its own, and the
+# confirmation can neither block nor crash a run without a terminal.
+bad = []
+for line, status, why in (
+        ("display page-change 99", core.EXIT_INVALID, "a value out of range"),
+        ("system usb-current 600", core.EXIT_REFUSED, "a safety check"),
+        ("signal-output power-switch", core.EXIT_REFUSED, "a power mode"),
+        ("alarm external on", core.EXIT_REFUSED, "an alarm that would fire"),
+        ("display brightness high", core.EXIT_NOT_CONFIRMED, "answered no")):
+    fake = FakeHighflow()
+    out, err, code = do(fake, line, answer="n")
+    if code is None or code.status != status or fake.written:
+        bad.append("%r (%s): status %r, expected %d" % (line, why, code and code.status, status))
+fake = FakeHighflow()
+fake.blobs[core.CTRL_REPORT_ID] = other_layout()
+out, err, code = do(fake, "info")
+if code is None or code.status != core.EXIT_DEVICE:
+    bad.append("an unknown layout: status %r, expected %d" % (code and code.status, core.EXIT_DEVICE))
+
+
+class Stubborn(FakeHighflow):
+    """Accepts writes but keeps reading back what it had: a firmware that
+    rejected the change."""
+    def write(self, buf):
+        self.written.append(bytes(buf))
+
+
+out, err, code = do(Stubborn(), "display brightness high -y")
+if code is None or code.status != core.EXIT_DIFFERS or "0x00f: 00 -> 02" not in code:
+    bad.append("a write the device did not keep: %r" % code)
+
+
+class Terminal(io.StringIO):
+    def isatty(self):
+        return True
+
+
+real_stdin = sys.stdin
+try:
+    for stdin, answer, status in ((io.StringIO("y\n"), None, core.EXIT_NOT_CONFIRMED),
+                                  (Terminal(""), False, None),        # end of input
+                                  (Terminal("yes\n"), True, None)):
+        sys.stdin = stdin
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                got = core.confirm("Proceed?")
+            if status is not None or got is not answer:
+                bad.append("confirm() on %r gave %r" % (stdin.getvalue(), got))
+        except core.Failure as exc:
+            if exc.code != status or "-y" not in exc.message:
+                bad.append("confirm() without a terminal: %r %r" % (exc.code, exc.message))
+    sys.stdin = io.StringIO("")
+    try:
+        with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+            highflow.cmd_volume_reset(FakeHighflow(), argparse.Namespace(dry_run=False, yes=True))
+        bad.append("volume reset ran without a terminal")
+    except core.Failure as exc:
+        if exc.code != core.EXIT_NOT_CONFIRMED or "-y" in exc.message:
+            bad.append("volume reset without a terminal: %r %r" % (exc.code, exc.message))
+finally:
+    sys.stdin = real_stdin
+
+# through cli.main: usage, an unknown serial
+discovery.attached = lambda: both
+core.Device = fake_device
+try:
+    for argv, status in ((["display", "brightness", "high"], core.EXIT_USAGE),
+                         (["--device"], core.EXIT_USAGE),
+                         (["info", "--device", HFN], core.EXIT_USAGE),
+                         (["--device", "99999-99999", "info"], core.EXIT_DEVICE),
+                         (["--device", HFN, "system", "usb-current", "600", "-y"],
+                          core.EXIT_REFUSED),
+                         (["--device", HFN, "display", "brightness", "high", "-y"], 0)):
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                cli.main(argv)
+            got = 0
+        except SystemExit as exc:
+            got = exc.code
+        if got != status:
+            bad.append("%s: status %r, expected %d" % (" ".join(argv), got, status))
+finally:
+    discovery.attached, core.Device = real_attached, real_device
+if "6  not confirmed" not in cli.general_help():
+    bad.append("the general help does not list the exit statuses")
+check("exit statuses: each outcome its own, no terminal never blocks", bad)
 
 print("\n%d/%d passed" % (checks - len(failures), checks))
 sys.exit(1 if failures else 0)

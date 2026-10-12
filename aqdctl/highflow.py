@@ -608,8 +608,9 @@ def _usb_guard(dev, before, after, args):
         return
     core.warn_danger(USB_WARNING, sys.stderr)
     print(file=sys.stderr)
-    sys.exit("Nothing written. Increasing max current above 500 mA requires --force:\n"
-             + core.force_hint(dev, args))
+    core.fail(core.EXIT_REFUSED,
+              "Nothing written. Increasing max current above 500 mA requires --force:\n"
+              + core.force_hint(dev, args))
 
 
 def _refuse_or_note(dev, args, text, ask):
@@ -618,8 +619,9 @@ def _refuse_or_note(dev, args, text, ask):
     if getattr(args, "force", False):
         print(textwrap.fill("--force: " + text, 78) + "\n")
         return
-    sys.exit(textwrap.fill("Nothing written. " + text, 78) + "\n" + ask + "\n"
-             + core.force_hint(dev, args))
+    core.fail(core.EXIT_REFUSED,
+              textwrap.fill("Nothing written. " + text, 78) + "\n" + ask + "\n"
+              + core.force_hint(dev, args))
 
 
 def _alarm_bytes_changed(before, after):
@@ -1055,8 +1057,9 @@ def cmd_volume_reset(dev, args):
     it always asks - -y does not skip that."""
     buf = dev.read_input(INPUT_REPORT_SIZE)
     if buf is None:
-        sys.exit("Report 0x01 did not arrive, so the counters cannot be shown before\n"
-                 "the reset, nor the reset checked after it. Nothing sent.")
+        core.fail(core.EXIT_DEVICE,
+                  "Report 0x01 did not arrive, so the counters cannot be shown before\n"
+                  "the reset, nor the reset checked after it. Nothing sent.")
     live = decode_live(buf)
     print("volume counter: %d l, %d impulses, %s since the last reset"
           % (live["volume"], live["impulses"], _duration(live["since_reset"])))
@@ -1066,22 +1069,18 @@ def cmd_volume_reset(dev, args):
         return
     if args.yes:
         print("(-y does not apply here: a reset cannot be undone, so it always asks.)")
-    try:
-        answer = input("Reset the volume counter? [y/N] ")
-    except EOFError:
-        answer = ""
-    if answer.strip().lower() not in ("y", "yes"):
-        sys.exit("Aborted.")
+    if not core.confirm("Reset the volume counter?",
+                        hint="A reset cannot be undone, so it is only done on a terminal."):
+        core.fail(core.EXIT_NOT_CONFIRMED, "Aborted.")
     dev.command(VOLUME_RESET_COMMAND)
     buf = dev.read_input(INPUT_REPORT_SIZE)
     after = decode_live(buf) if buf else None
-    if after is not None and after["volume"] == 0 and after["since_reset"] < 10:
-        print("Reset: %d l, %d impulses, %s since the reset."
-              % (after["volume"], after["impulses"], _duration(after["since_reset"])))
-    else:
-        print("WARNING: the next live report does not show a reset counter%s."
-              % (": %d l, %s" % (after["volume"], _duration(after["since_reset"]))
-                 if after else " (none arrived)"))
+    if after is None or after["volume"] != 0 or after["since_reset"] >= 10:
+        core.fail(core.EXIT_DIFFERS, "Sent, but the next live report does not show a reset counter%s."
+                  % (": %d l, %s" % (after["volume"], _duration(after["since_reset"]))
+                     if after else " (none arrived)"))
+    print("Reset: %d l, %d impulses, %s since the reset."
+          % (after["volume"], after["impulses"], _duration(after["since_reset"])))
 
 
 # ------------------------------------------------------------------ parser

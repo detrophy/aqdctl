@@ -34,6 +34,15 @@ LIVE_WAIT_MS = 1500         # the device sends its live readings once a second
 # to change it.
 STRUCTURE_OFFSET = 1
 
+# Exit statuses, for scripts; the general help lists them. A plain
+# sys.exit(message) exits with 1 and stays the way to reject a bad value.
+EXIT_INVALID = 1          # a value or file aqdctl will not use
+EXIT_USAGE = 2            # the command line itself (argparse uses 2 as well)
+EXIT_DEVICE = 3           # device missing, unreadable, or of an unknown layout
+EXIT_REFUSED = 4          # a safety check or protected channel; --force would pass
+EXIT_DIFFERS = 5          # written, but the device reads back other values
+EXIT_NOT_CONFIRMED = 6    # the write was not confirmed
+
 # A serial as the USB descriptor and Aquasuite give it: two five-digit groups.
 SERIAL_PATTERN = re.compile(r"\d{5}-\d{5}")
 
@@ -82,6 +91,35 @@ def firmware(live):
     return be16(live, FIRMWARE_OFFSET)
 
 
+class Failure(SystemExit):
+    """Ends a command with one of the EXIT_ statuses. str() is the message,
+    which cli.main prints on stderr, as Python does for sys.exit(message)."""
+
+    def __init__(self, status, message):
+        super().__init__(status)
+        self.message = message
+
+    def __str__(self):
+        return self.message
+
+
+def fail(status, message):
+    raise Failure(status, message)
+
+
+def confirm(question, notice=None, hint="Add -y to write without asking."):
+    """Ask on the terminal; True for yes. The question goes to stderr, so
+    stdout carries only results. Without a terminal there is nobody to ask, so the
+    command ends unconfirmed instead of waiting or failing on end of input."""
+    if sys.stdin is None or not sys.stdin.isatty():
+        fail(EXIT_NOT_CONFIRMED, "Nothing written: no terminal to confirm on. " + hint)
+    if notice:
+        print(notice, file=sys.stderr)
+    sys.stderr.write(question + " [y/N] ")
+    sys.stderr.flush()
+    return sys.stdin.readline().strip().lower() in ("y", "yes")
+
+
 def layout_version(settings):
     """The layout version a settings report declares."""
     return be16(settings, STRUCTURE_OFFSET)
@@ -92,7 +130,7 @@ def check_layout(kind, settings):
     decodes. Every offset in it would be a guess."""
     found = layout_version(settings)
     if found != kind.STRUCTURE_ID:
-        sys.exit("The %s's settings use layout version %d; aqdctl knows version %d.\n"
+        fail(EXIT_DEVICE, "The %s's settings use layout version %d; aqdctl knows version %d.\n"
                  "A firmware update may have moved its fields, so aqdctl reads no further\n"
                  "and writes nothing. 'backup' still saves the raw reports."
                  % (kind.TITLE, found, kind.STRUCTURE_ID))
@@ -263,7 +301,7 @@ def set_protected(serial, channels):
 
 def guard_channel(serial, channel, force):
     if channel in protected_channels(serial) and not force:
-        sys.exit("Channel %d is protected. Re-run with --force if you mean it, or\n"
+        fail(EXIT_REFUSED, "Channel %d is protected. Re-run with --force if you mean it, or\n"
                  "lift the protection with 'aqdctl --device %s fan set %d protect off'."
                  % (channel, serial, channel))
 
@@ -282,14 +320,14 @@ class Device:
 
     def __enter__(self):
         if hid is None:
-            sys.exit("python-hidapi not found. Install it with 'pip install hidapi'\n"
+            fail(EXIT_DEVICE, "python-hidapi not found. Install it with 'pip install hidapi'\n"
                      "(on Arch: pacman -S python-hidapi).")
         self.dev = hid.device()
         try:
             self.dev.open_path(self.path)
         except (IOError, OSError) as exc:
             node = self.path.decode() if isinstance(self.path, bytes) else self.path
-            sys.exit("Cannot open the %s %s at %s (%s).\nRun as root, or install the "
+            fail(EXIT_DEVICE, "Cannot open the %s %s at %s (%s).\nRun as root, or install the "
                      "udev rule that 'aqdctl --help-udev' prints."
                      % (self.kind.TITLE, self.serial, node, exc))
         return self
@@ -314,11 +352,11 @@ class Device:
         buf = bytes(self.dev.get_feature_report(report_id, size))
         self._last_op = time.monotonic()
         if len(buf) != size:
-            sys.exit("Short report %#04x: got %d bytes, expected %d."
+            fail(EXIT_DEVICE, "Short report %#04x: got %d bytes, expected %d."
                      % (report_id, len(buf), size))
         stored, computed = report_crc(buf)
         if stored != computed:
-            sys.exit("Report %#04x checksum mismatch (stored %#06x, computed %#06x).\n"
+            fail(EXIT_DEVICE, "Report %#04x checksum mismatch (stored %#06x, computed %#06x).\n"
                      "Refusing to continue - the layout assumptions do not hold on this "
                      "firmware." % (report_id, stored, computed))
         if check and report_id == CTRL_REPORT_ID:
@@ -334,7 +372,7 @@ class Device:
             sys.exit("Refusing to send a report with a stale checksum (internal error).")
         self._pace()
         if self.dev.send_feature_report(bytes(buf)) < 0:
-            sys.exit("send_feature_report failed.")
+            fail(EXIT_DEVICE, "send_feature_report failed.")
         self._last_op = time.monotonic()
         if buf[0] != CTRL_REPORT_ID:
             return
@@ -345,7 +383,7 @@ class Device:
         # by raising.
         self._pace()
         if self.dev.write(SECONDARY_CTRL_REPORT) < 0:
-            sys.exit("The settings report was written, but report 0x02, which "
+            fail(EXIT_DEVICE, "The settings report was written, but report 0x02, which "
                      "Aquasuite sends after\nevery settings change, failed. The "
                      "change is active; it may not survive a power\ncycle. Run "
                      "the command again to retry.")
@@ -355,7 +393,7 @@ class Device:
         """Send one command frame, as an output report, checked."""
         self._pace()
         if self.dev.write(command_frame(code)) < 0:
-            sys.exit("Command %#04x failed." % code)
+            fail(EXIT_DEVICE, "Command %#04x failed." % code)
         self._last_op = time.monotonic()
 
     def read_input(self, size, timeout_ms=LIVE_WAIT_MS):
@@ -433,15 +471,19 @@ def diff(before, after):
     return [(i, before[i], after[i]) for i in range(len(before)) if before[i] != after[i]]
 
 
-def show_diff(before, after):
+def diff_lines(before, after):
     changes = diff(before, after)
     tail = len(before) - 2
     body = [c for c in changes if c[0] < tail]
-    print("byte changes (excluding checksum): %d" % len(body))
-    for off, old, new in body:
-        print("  0x%03x: %02x -> %02x" % (off, old, new))
+    lines = ["byte changes (excluding checksum): %d" % len(body)]
+    lines += ["  0x%03x: %02x -> %02x" % c for c in body]
     if len(changes) != len(body):
-        print("  checksum resealed")
+        lines.append("  checksum resealed")
+    return lines
+
+
+def show_diff(before, after):
+    print("\n".join(diff_lines(before, after)))
 
 
 def commit(dev, before, after, args):
@@ -459,19 +501,17 @@ def commit(dev, before, after, args):
     path = backup(before, dev, args.backup)
     print("\nbackup written to %s" % path)
     if not args.yes:
-        print("These writes go into the %s's persistent memory - they survive a"
-              % dev.kind.TITLE)
-        print("reboot and will show up in Aquasuite.")
-        if input("Proceed? [y/N] ").strip().lower() not in ("y", "yes"):
-            sys.exit("Aborted.")
+        notice = ("These writes go into the %s's persistent memory - they survive a\n"
+                  "reboot and will show up in Aquasuite." % dev.kind.TITLE)
+        if not confirm("Proceed?", notice):
+            fail(EXIT_NOT_CONFIRMED, "Aborted.")
     dev.write(after)
     verify = dev.read(before[0])
     if diff(verify, after):
-        print("WARNING: device state differs from what was written:")
-        show_diff(after, verify)
-        print("The firmware may have rejected or adjusted some values.")
-    else:
-        print("Written and verified.")
+        fail(EXIT_DIFFERS, "Written, but the device reads back other values:\n%s\n"
+             "The firmware may have rejected or adjusted some of them."
+             % "\n".join(diff_lines(after, verify)))
+    print("Written and verified.")
 
 
 def cmd_backup(dev, args):
@@ -513,19 +553,19 @@ def cmd_restore(dev, args):
     # its whole configuration - pumps included - onto this one.
     origin = SERIAL_PATTERN.search(os.path.basename(args.file))
     if not force and origin is None:
-        sys.exit("%s does not say which device it came from: its name holds no\n"
+        fail(EXIT_REFUSED, "%s does not say which device it came from: its name holds no\n"
                  "serial, and the report itself carries none. Re-run with --force if\n"
                  "it was taken from this %s (%s)."
                  % (args.file, dev.kind.TITLE, dev.serial))
     if not force and origin.group(0) != dev.serial:
-        sys.exit("%s was taken from device %s, not from %s. Restoring it would\n"
+        fail(EXIT_REFUSED, "%s was taken from device %s, not from %s. Restoring it would\n"
                  "copy that device's settings onto this one. Re-run with --force if\n"
                  "that is what you want." % (args.file, origin.group(0), dev.serial))
     # A restore rewrites the whole report, so it reaches protected channels too.
     # There is no per-channel version of this, hence the blanket refusal.
     guarded = protected_channels(dev.serial)
     if guarded and rid == CTRL_REPORT_ID and not force:
-        sys.exit("Restoring rewrites every channel, including protected channel%s "
+        fail(EXIT_REFUSED, "Restoring rewrites every channel, including protected channel%s "
                  "%s.\nRe-run with --force if that is what you want."
                  % ("" if len(guarded) == 1 else "s",
                     ", ".join(str(c) for c in sorted(guarded))))
