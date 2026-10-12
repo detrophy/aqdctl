@@ -1834,7 +1834,7 @@ for text, status_wanted, words in (
          "The flow alarm limit is 0-1000"),
         ("display.rotat=on\n", core.EXIT_INVALID, "is not a key of this high flow NEXT"),
         ("rgb.controller.5.pos=1-3\n", core.EXIT_INVALID, "that controller is not in use"),
-        ("display.rotate on\n", core.EXIT_INVALID, "is not key=value"),
+        ("display.rotate on\n", core.EXIT_USAGE, "invalid choice: 'display.rotate'"),
         ("display.rotate=maybe\n", core.EXIT_INVALID, "on or off"),
         ("system.usb-current=1000\n", core.EXIT_REFUSED, "requires --force")):
     fake = FakeHighflow()
@@ -1842,6 +1842,31 @@ for text, status_wanted, words in (
     if status != status_wanted or fake.written or words not in err:
         bad.append("%r: status %r, %d writes: %s" % (text, status, len(fake.written), err))
 check("batch: a bad line writes nothing and is named", bad)
+
+# command lines: run in order, with the key=value lines around them
+bad = []
+fake = FakeHighflow()
+status, out, err = run_batch(fake, 'display brightness high\nalarm.flow.limit=60\n'
+                             'name sensor internal "Loop In"\n', "-y")
+if status or sorted(b[0] for b in fake.written) != [3, 8]:
+    bad.append("mixed: %r %s" % (status, err))
+for line in ("display.brightness: low -> high", "alarm.flow.limit: 45.0 -> 60.0",
+             "name.sensor.internal: "):
+    if line not in out:
+        bad.append("missing %r in:\n%s" % (line, out))
+for text, words in (("display brightness high -y\n", "-y belongs to the batch"),
+                    ("alarm flow --limit 60 --backup=x.bin\n", "--backup belongs"),
+                    ("volume reset\n", "volume reset always asks"),
+                    ("info\n", "this command changes nothing"),
+                    ("get display\n", "this command changes nothing"),
+                    ("display brightnes high\n", "invalid choice: 'brightnes'"),
+                    ("name sensor internal \"open\n", "No closing quotation")):
+    fake = FakeHighflow()
+    status, out, err = run_batch(fake, "display.rotate=on\n" + text, "-y")
+    if status != core.EXIT_USAGE or fake.written or words not in err or "line 2" not in err:
+        bad.append("%r: %r %s" % (text, status, err))
+check("batch: command lines run in order with the key=value lines; batch-only flags and "
+      "commands that change nothing are refused", bad)
 
 # changes judged together: each line passes alone, the two together make the
 # flow alarm fire (206.5 l/h, 5 % less at 200-250 l/h, limit 200)

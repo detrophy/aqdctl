@@ -1525,7 +1525,22 @@ if not exc or exc.code != core.EXIT_INVALID or fake.written or "share LEDs" not 
 exc, fake = octo_batch("rgb.controller.1.param.limits=2\n")
 if not exc or "line 1" not in str(exc):
     bad.append("a parameter static does not have: %r" % exc)
-outcome("batch: RGB controllers - a new effect's keys, trading places, overlaps", bad)
+# command lines create and remove controllers; key lines after them see the result
+exc, fake = octo_batch("rgb remove controller 11\n"
+                       "rgb create 2 pos 46-60 --effect static --colour 00FF00\n"
+                       "rgb.controller.11.colours=0000FF\n")
+after = octo_values(fake)
+if exc or (after.get("rgb.controller.11.pos"), after.get("rgb.controller.11.colours")) \
+        != ("46-60", "0000FF") or len(fake.written) != 1:
+    bad.append("remove, create, then a key: %s" % exc)
+exc, fake = octo_batch("rgb.controller.11.colours=0000FF\nrgb remove controller 11\n")
+if exc or "rgb.controller.11.pos" in octo_values(fake):
+    bad.append("a key, then remove: %s" % exc)
+exc, fake = octo_batch("fan set 1 protect on\n")
+if not exc or "fan.N.protect" not in str(exc):
+    bad.append("protect as a command line: %r" % exc)
+outcome("batch: RGB controllers - a new effect's keys, trading places, overlaps, "
+        "created and removed by command lines", bad)
 
 # every fixture's keys, given to another fixture with the same controllers,
 # make every key equal; given back to their own, change nothing

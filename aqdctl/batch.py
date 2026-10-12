@@ -1,8 +1,10 @@
 """Many changes, one write.
 
-'batch' takes key=value lines, the keys 'get' prints. Each line becomes the
-command that sets its key, and runs as that command would, with the same
-checks - but against a copy of the device's reports instead of the device.
+'batch' takes key=value lines, the keys 'get' prints, and command lines, as
+typed after --device. Each key=value line becomes the command that sets its
+key. Every command runs as it would on its own, with the same checks - but
+against a copy of the device's reports instead of the device. Lines run in
+the order given; key=value lines that follow each other run together.
 When every line has run, the device's safety checks look at all the changes
 together, and each changed report is written once: one backup, one
 confirmation, one write, one save. A line that fails writes nothing at all.
@@ -15,6 +17,7 @@ import contextlib
 import io
 import json
 import re
+import shlex
 import sys
 
 from . import core, keys, rgbpx
@@ -55,10 +58,15 @@ class Staged:
 
 
 class Line:
-    def __init__(self, number, key, value):
+    """A key=value line (key, value), or a command line (argv)."""
+
+    def __init__(self, number, key=None, value=None, argv=None, text=None):
         self.number, self.key, self.value = number, key, value
+        self.argv, self.text = argv, text
 
     def __str__(self):
+        if self.argv is not None:
+            return "line %d (%s)" % (self.number, self.text)
         return "line %d (%s=%s)" % (self.number, self.key, self.value)
 
 
@@ -69,22 +77,28 @@ def _where(lines):
 
 
 def parse(text):
-    """The key=value lines of a batch, without blank lines and # comments.
-    A value runs to the end of its line, as 'get' prints it."""
+    """The lines of a batch, without blank lines and # comments. A line whose
+    text before the first '=' holds no space is key=value, its value running to
+    the end of the line as 'get' prints it; any other line is a command."""
     out, seen = [], {}
     for number, raw in enumerate(text.splitlines(), 1):
-        line = raw.lstrip()
-        if not line.strip() or line.startswith("#"):
+        line = raw.strip()
+        if not line or line.startswith("#"):
             continue
-        key, sep, value = line.partition("=")
+        key, sep, value = raw.lstrip().partition("=")
         key = key.strip()
-        if not sep or not key or " " in key:
-            core.fail(core.EXIT_INVALID, "line %d: %r is not key=value." % (number, line))
-        if key in seen:
-            core.fail(core.EXIT_INVALID, "line %d: %s is already set on line %d."
-                      % (number, key, seen[key]))
-        seen[key] = number
-        out.append(Line(number, key, value))
+        if sep and key and not re.search(r"\s", key):
+            if key in seen:
+                core.fail(core.EXIT_INVALID, "line %d: %s is already set on line %d."
+                          % (number, key, seen[key]))
+            seen[key] = number
+            out.append(Line(number, key, value))
+            continue
+        try:
+            argv = shlex.split(line)
+        except ValueError as exc:
+            core.fail(core.EXIT_USAGE, "line %d (%s): %s." % (number, line, exc))
+        out.append(Line(number, argv=argv, text=line))
     return out
 
 
@@ -242,17 +256,53 @@ def _same(key, value, text):
     return value == text
 
 
-def _run(parser, staged, argv, lines, args):
-    """Run one command against the batch's copies. Its output is not shown:
-    the batch reports the changes of all its lines together."""
+def _parse(parser, argv, lines):
     err = io.StringIO()
     try:
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
-            parsed = parser.parse_args(argv)
+            return parser.parse_args(argv)
     except SystemExit:
         message = err.getvalue().strip().splitlines()[-1:] or ["not a command"]
         core.fail(core.EXIT_USAGE, "%s: %s" % (_where(lines),
                                               message[0].split("error: ", 1)[-1]))
+
+
+# Write flags belong to the batch, which writes once for all of its lines.
+WRITE_FLAGS = {"-n", "--dry-run", "-v", "--verbose", "-y", "--yes", "-q", "--quiet",
+               "--backup", "--force"}
+# Commands that change settings but cannot run in a batch, and why.
+NOT_IN_BATCH = {
+    "cmd_restore": "restore replaces whole reports; run it on its own",
+    "cmd_batch": "a batch cannot run another batch",
+    "cmd_volume_reset": "volume reset always asks, so it runs on its own",
+    "cmd_protect": "use the key fan.N.protect=on|off",
+}
+
+
+def _command(parser, staged, line, args):
+    """Run a command line of a batch."""
+    flags = [w.split("=", 1)[0] for w in line.argv if w.split("=", 1)[0] in WRITE_FLAGS]
+    if flags:
+        core.fail(core.EXIT_USAGE, "%s: %s belongs to the batch, not to one of its lines."
+                  % (line, flags[0]))
+    parsed = _parse(parser, line.argv, [line])
+    name = getattr(getattr(parsed, "func", None), "__name__", "")
+    if name in NOT_IN_BATCH:
+        core.fail(core.EXIT_USAGE, "%s: not in a batch: %s." % (line, NOT_IN_BATCH[name]))
+    if not hasattr(parsed, "dry_run"):
+        core.fail(core.EXIT_USAGE, "%s: not in a batch: this command changes nothing."
+                  % line)
+    _execute(parsed, staged, [line], args)
+
+
+def _run(parser, staged, argv, lines, args):
+    """Run the command a group of key=value lines makes."""
+    _execute(_parse(parser, argv, lines), staged, lines, args)
+
+
+def _execute(parsed, staged, lines, args):
+    """Run one parsed command against the batch's copies. Its output is not
+    shown: the batch reports the changes of all its lines together."""
     parsed.force = getattr(args, "force", False)
     parsed.typed = args.typed
     try:
@@ -277,6 +327,47 @@ def prepare(dev, lines, args):
     checks on all the changes together. Nothing is written."""
     kind = dev.kind
     staged = Staged(dev)
+    parser = kind.build_parser("aqdctl --device %s" % dev.serial)
+    original = _settable(kind, keys.Context(kind, dev.serial, staged))
+    protect, run = {}, []
+    for line in lines + [None]:
+        if line is not None and line.argv is None:
+            run.append(line)
+            continue
+        if run:
+            _keys(kind, dev, staged, parser, run, protect, args)
+            run = []
+        if line is not None:
+            _command(parser, staged, line, args)
+
+    layout = getattr(kind, "RGB", None)
+    if layout and core.CTRL_REPORT_ID in staged.reports:
+        clash = rgbpx.first_overlap(staged.reports[core.CTRL_REPORT_ID], layout)
+        if clash:
+            core.fail(core.EXIT_INVALID, "Controllers %d and %d would share LEDs on "
+                      "channel %d. Nothing written." % clash)
+
+    after = _settable(kind, keys.Context(kind, dev.serial, staged))
+    for name, on in protect.items():
+        after[name] = (original[name][0], on)
+    # A controller's keys follow its effect, so a new effect brings keys the
+    # old one did not have, and takes others away; so does creating or
+    # removing a controller.
+    changes = []
+    for name in list(original) + [n for n in after if n not in original]:
+        old, new = original.get(name, (None, None)), after.get(name, (None, None))
+        if old[1] != new[1]:
+            changes.append((new[0] or old[0], old[1], new[1]))
+    guard = getattr(kind, "guard_write", None)
+    if guard and core.CTRL_REPORT_ID in staged.changed():
+        guard(dev, staged.original[core.CTRL_REPORT_ID],
+              bytearray(staged.reports[core.CTRL_REPORT_ID]), args)
+    return Plan(staged, changes, protect)
+
+
+def _keys(kind, dev, staged, parser, lines, protect, args):
+    """Apply a run of key=value lines, as the reports stand after the lines
+    before them."""
     current = _settable(kind, keys.Context(kind, dev.serial, staged))
     texts = {name: key.text(value) for name, (key, value) in current.items()}
     # A controller that changes its effect gets every line given for it: its
@@ -289,7 +380,7 @@ def prepare(dev, lines, args):
     readonly = {k.name for k in keys.select(kind.key_table(),
                                             keys.Context(kind, dev.serial, staged))
                 if not k.settable}
-    todo, protect = [], {}
+    todo = []
     for line in lines:
         if line.key in readonly:
             continue                # what get prints about the device, not a setting
@@ -306,33 +397,8 @@ def prepare(dev, lines, args):
             protect[line.key] = line.value == "on"
         else:
             todo.append(line)
-
-    parser = kind.build_parser("aqdctl --device %s" % dev.serial)
     for argv, used in _commands(todo, texts):
         _run(parser, staged, argv, used, args)
-
-    layout = getattr(kind, "RGB", None)
-    if layout and core.CTRL_REPORT_ID in staged.reports:
-        clash = rgbpx.first_overlap(staged.reports[core.CTRL_REPORT_ID], layout)
-        if clash:
-            core.fail(core.EXIT_INVALID, "Controllers %d and %d would share LEDs on "
-                      "channel %d. Nothing written." % clash)
-
-    after = _settable(kind, keys.Context(kind, dev.serial, staged))
-    for name, on in protect.items():
-        after[name] = (current[name][0], on)
-    # A controller's keys follow its effect, so a new effect brings keys the
-    # old one did not have, and takes others away.
-    changes = []
-    for name in list(current) + [n for n in after if n not in current]:
-        old, new = current.get(name, (None, None)), after.get(name, (None, None))
-        if old[1] != new[1]:
-            changes.append((new[0] or old[0], old[1], new[1]))
-    guard = getattr(kind, "guard_write", None)
-    if guard and core.CTRL_REPORT_ID in staged.changed():
-        guard(dev, staged.original[core.CTRL_REPORT_ID],
-              bytearray(staged.reports[core.CTRL_REPORT_ID]), args)
-    return Plan(staged, changes, protect)
 
 
 def _unknown(kind, dev, staged, current, line):
@@ -436,16 +502,19 @@ def register(sub, prefix):
     p = core.add_write_flags(sub.add_parser(
         "batch", formatter_class=core.HelpFormatter,
         help="set many keys with one write",
-        description="Set the keys of FILE, one key=value per line as 'get' prints them; "
-                    "blank lines and lines starting with # are skipped. Each line runs "
-                    "as the command that sets its key, with the same checks, and the "
-                    "safety checks then judge all changes together. The device is "
-                    "written once, and only if every line succeeds. Keys that already "
-                    "hold their value, and read-only keys, are left alone. FILE '-' "
-                    "reads stdin and needs -y or -n.",
+        description="Apply the lines of FILE: key=value lines as 'get' prints them, and "
+                    "commands as typed after --device, such as 'rgb create ...'. Blank "
+                    "lines and lines starting with # are skipped. Lines run in order, "
+                    "each with the checks of its command; the safety checks then judge "
+                    "all changes together. The device is written once, and only if "
+                    "every line succeeds. Keys that already hold their value, and "
+                    "read-only keys, are left alone. Write flags go on the batch, not on "
+                    "its lines. FILE '-' reads stdin and needs -y or -n.",
         epilog="examples:\n"
                "  {p} get display > display.txt\n"
                "  {p} batch display.txt -n\n"
+               "  printf 'rgb remove controller 2\\nrgb.brightness=50\\n' | "
+               "{p} batch - -y\n"
                "  printf 'display.brightness=low\\nalarm.flow.limit=60\\n' | "
                "{p} batch - -y".format(p=prefix)),
         force="go past a safety check, or write to a protected channel")
