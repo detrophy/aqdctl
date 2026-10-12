@@ -10,7 +10,7 @@ import contextlib
 import os
 import sys
 
-from . import core, discovery
+from . import core, discovery, keys
 
 
 def _supported():
@@ -25,6 +25,7 @@ usage: aqdctl info
        aqdctl --device SERIAL COMMAND ...
        aqdctl --device SERIAL --help
        aqdctl --help-udev
+       aqdctl --api
 
 Read and change the settings stored on Aquacomputer devices, without Aquasuite.
 Supported: {supported}.
@@ -33,6 +34,8 @@ Supported: {supported}.
   aqdctl list                     the same for scripts: serial, type, alias
   aqdctl --device SERIAL --help   the commands that device offers
   aqdctl --device SERIAL info     its settings and live readings
+  aqdctl --api                    the version of the key names of get, batch
+                                  and serve; it goes up when one is renamed
 
 --device comes first, and every command other than the device lists needs it.
 The serial is the one Aquasuite shows, e.g. 12345-67890. It is the only way of
@@ -104,6 +107,9 @@ def _main(argv):
         return
     if argv[0] == "--help-udev":
         print(udev_help())
+        return
+    if argv == ["--api"]:
+        print(keys.API_VERSION)
         return
     if argv == ["info"]:
         discovery.list_devices(discovery.attached())

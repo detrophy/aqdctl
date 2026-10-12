@@ -1755,6 +1755,9 @@ try:
     if json.loads(out) != [{"key": "display.brightness", "type": "choice", "settable": True,
                             "choices": ["high", "medium", "low"]}]:
         bad.append("get --keys --json: %r" % out)
+    status, out, err = run_cli(["--api"])
+    if (status, out) != (0, "%d\n" % keys.API_VERSION):
+        bad.append("--api: %r %r" % (status, out))
     for argv in (["get", "nosuch"], ["get", "live.flo"], ["get", "rgb.controller.5"],
                  ["get", "--keys", "nosuch"]):
         status, out, err = run_cli(["--device", HFN] + argv)
@@ -1762,7 +1765,8 @@ try:
             bad.append("%s: %r %r %r" % (" ".join(argv), status, out, err))
 finally:
     discovery.attached, core.Device = real_attached, real_device
-check("get: key=value lines, --value, --json, --keys; a prefix matching nothing exits 1",
+check("get: key=value lines, --value, --json, --keys, --api; a prefix matching nothing "
+      "exits 1",
       bad)
 
 # rgb.brightness has two decimals: enough for every byte to come back as itself
