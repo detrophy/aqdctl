@@ -1274,6 +1274,33 @@ if bad:
 else:
     print("  ok    protected channel: refused with status 4, --force passes")
 
-total = len(CASES) + 42
+# the flow header's reading, through the kernel driver: 0.01 l/h, whatever
+# its label says
+bad = []
+with tempfile.TemporaryDirectory() as tmp:
+    for leaf, text in (("fan9_input", "19119"), ("fan9_label", "Flow speed [dL/h]"),
+                       ("temp1_input", "26160")):
+        with open(os.path.join(tmp, leaf), "w") as fh:
+            fh.write(text + "\n")
+    real = discovery.hwmon_dir
+    discovery.hwmon_dir = lambda serial: tmp
+    try:
+        live = m.read_live(SERIAL)
+    finally:
+        discovery.hwmon_dir = real
+if live.get("flow") != 191.19:
+    bad.append("19119 read as %r l/h, not 191.19" % live.get("flow"))
+out = io.StringIO()
+with contextlib.redirect_stdout(out):
+    m.info_sensor(BLOBS[m.CTRL_REPORT_ID], [""] * 4, live)
+if "reading: 191.19 l/h" not in out.getvalue():
+    bad.append("info shows:\n" + out.getvalue())
+if bad:
+    failures.append(("flow unit", "; ".join(bad)))
+    print("  FAIL  flow unit: %s" % "; ".join(bad))
+else:
+    print("  ok    flow header: 0.01 l/h through the kernel driver")
+
+total = len(CASES) + 43
 print("\n%d/%d passed" % (total - len(failures), total))
 sys.exit(1 if failures else 0)

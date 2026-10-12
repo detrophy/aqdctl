@@ -302,7 +302,7 @@ def info_sensor(buf, names, live):
     print()
     flow = live.get("flow")
     print("  flow: %d impulses/litre    reading: %s"
-          % (st["flow_pulses"], "-" if flow is None else "%.1f l/h" % flow))
+          % (st["flow_pulses"], "-" if flow is None else "%.2f l/h" % flow))
     print()
     print("  Offsets are stored on the device and survive a reboot; the reading")
     print("  already has the offset applied.")
@@ -645,8 +645,8 @@ def read_live(serial):
         out["fan"][ch] = read("fan%d_input" % ch)
     for s in range(1, 5):
         out["temp"][s] = read("temp%d_input" % s, 1000.0)
-    # fan9 is the flow sensor, reported in decilitres per hour.
-    out["flow"] = read("fan9_input", 10.0)
+    # fan9 is the flow sensor, in 0.01 l/h although the driver labels it dL/h.
+    out["flow"] = read("fan9_input", 100.0)
     return out
 
 
