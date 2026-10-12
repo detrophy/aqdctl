@@ -8,10 +8,11 @@ rgbpx and names, pointed at the Octo's layout. Offsets are firmware dependent
 - if a checksum check fails, stop."""
 
 import argparse
+import functools
 import struct
 import sys
 
-from . import core, names, rgbpx
+from . import core, keys, names, rgbpx
 from .core import (be16, sbe16, put_be16, reseal, pct, to_raw_pct, require_pct,
                    require_window, commit)
 
@@ -619,8 +620,10 @@ def cmd_offset(dev, args):
 # -------------------------------------------------------------------- live
 
 def read_live(serial):
-    """Live readings from the kernel driver: {"fan": {1: rpm}, "temp": {1: degC},
-    "flow": litres/hour}. Empty if aquacomputer_d5next is not loaded.
+    """Live readings from the kernel driver: {"fan": {1: rpm}, "power": {1: W},
+    "voltage": {1: V}, "current": {1: A}, "temp": {1: degC}, "virtual": {1:
+    degC}, "flow": litres/hour}. Empty if aquacomputer_d5next is not loaded; a
+    virtual sensor nothing feeds reads None.
 
     Found by serial, not by hwmon name: with two Octos, the first node named
     "octo" may be the other one. A plain sysfs read, so it needs no root and no
@@ -640,14 +643,117 @@ def read_live(serial):
         except (OSError, ValueError):
             return None
 
-    out = {"fan": {}, "temp": {}, "flow": None}
+    out = {"fan": {}, "power": {}, "voltage": {}, "current": {}, "temp": {},
+           "virtual": {}, "flow": None}
     for ch in range(1, FAN_CHANNELS + 1):
         out["fan"][ch] = read("fan%d_input" % ch)
+        out["power"][ch] = read("power%d_input" % ch, 1000000.0)
+        out["voltage"][ch] = read("in%d_input" % (ch - 1), 1000.0)
+        out["current"][ch] = read("curr%d_input" % ch, 1000.0)
     for s in range(1, 5):
         out["temp"][s] = read("temp%d_input" % s, 1000.0)
+    # The 16 virtual sensors follow the four physical ones.
+    for s in range(1, 17):
+        out["virtual"][s] = read("temp%d_input" % (s + 4), 1000.0)
     # fan9 is the flow sensor, in 0.01 l/h although the driver labels it dL/h.
     out["flow"] = read("fan9_input", 100.0)
     return out
+
+
+# -------------------------------------------------------------------- keys
+
+def live_for_keys(ctx):
+    """The live readings for live.* keys: the kernel driver's, which need no
+    access to the device."""
+    return read_live(ctx.serial)
+
+
+MODE_WORDS = {MODE_MANUAL: "fixed", MODE_TARGET: "target", MODE_CURVE: "curve"}
+
+
+def _mode_word(value):
+    """A channel's mode as 'fan set N mode' takes it."""
+    return "follow" if is_linked(value) else keys.named(MODE_WORDS, value)
+
+
+def _fan_keys(ch):
+    S = keys.SETTINGS
+    base, rec = channel_base(ch), record_base(ch)
+    p = "fan.%d" % ch
+
+    def power(name, offset):
+        return keys.number("%s.%s" % (p, name), offset, 100.0, "%.2f", "%", 0, 100)
+
+    def celsius(name, offset, high):
+        return keys.number("%s.%s" % (p, name), offset, 100.0, "%.2f", "C", 0, high)
+
+    def flag(name, bit):
+        return keys.Key("%s.%s" % (p, name), S,
+                        lambda c: bool(c.settings[rec + REC_FLAGS] & bit), "on/off")
+
+    def pid(name, offset, scale, unit=""):
+        return keys.number("%s.pid.%s" % (p, name), offset, scale, "%g", unit, 0,
+                           0xFFFF / scale)
+
+    return [keys.Key(p + ".mode", S, lambda c: _mode_word(c.settings[base + OFF_MODE]),
+                     "choice", choices=["fixed", "target", "curve", "follow"]),
+            power("fixed.power", base + OFF_SETPOINT),
+            celsius("target.temperature", base + OFF_TARGET, 100),
+            keys.Key(p + ".sensor", S,
+                     lambda c: source_short(be16(c.settings, base + OFF_SOURCE)),
+                     "source"),
+            keys.Key(p + ".curve.points", S, lambda c: read_curve(c.settings, ch),
+                     "points", unit="C:%", low=0, high=CURVE_TEMP_MAX),
+            celsius("curve.startup", base + OFF_STARTUP, CURVE_TEMP_MAX),
+            keys.integer(p + ".follow",
+                         lambda c: link_target(c.settings[base + OFF_MODE])
+                         if is_linked(c.settings[base + OFF_MODE]) else None,
+                         low=1, high=FAN_CHANNELS),
+            power("limits.min", rec + REC_MIN),
+            power("limits.max", rec + REC_MAX),
+            power("fallback", rec + REC_FALLBACK),
+            flag("boost", REC_FLAG_BOOST),
+            flag("hold-min", REC_FLAG_HOLD_MIN),
+            keys.integer(p + ".max-rpm", lambda c: be16(c.settings, rec + REC_MAX_RPM),
+                         "rpm", 0, 0xFFFF),
+            pid("p", base + OFF_PID_P, 1.0),
+            pid("i", base + OFF_PID_I, 1.0),
+            pid("d", base + OFF_PID_D, 1.0),
+            pid("reset", base + OFF_PID_RESET, 10.0, "s"),
+            pid("hysteresis", base + OFF_HYSTERESIS, 100.0, "K"),
+            keys.Key(p + ".protect", keys.CONFIG,
+                     lambda c: ch in core.protected_channels(c.serial), "on/off")]
+
+
+@functools.lru_cache(maxsize=None)
+def key_table():
+    t = keys.identity(sys.modules[__name__]) + [keys.firmware()]
+    t += [keys.integer("device.profile", lambda c: c.settings[PROFILE_INDEX],
+                       settable=False)]
+    for ch in range(1, FAN_CHANNELS + 1):
+        t += _fan_keys(ch)
+    t += [keys.number("sensor.offset.%d" % n, TEMP_OFFSETS + 2 * (n - 1), 100.0, "%.2f",
+                      "C", -15, 15, signed=True) for n in range(1, 5)]
+    t += [keys.integer("sensor.flow", lambda c: be16(c.settings, FLOW_PULSES),
+                       "impulses/l", 10, 1000)]
+    t += rgbpx.key_table(sys.modules[__name__])
+    t += names.key_table(NAME_GROUPS)
+
+    def live(name, group, index, unit, fmt):
+        return keys.Key(name, keys.LIVE,
+                        lambda c: c.live.get(group, {}).get(index),
+                        "integer" if fmt == "%d" else "number", unit=unit, fmt=fmt,
+                        settable=False)
+    for ch in range(1, FAN_CHANNELS + 1):
+        t += [live("live.fan.%d.rpm" % ch, "fan", ch, "rpm", "%d"),
+              live("live.fan.%d.power" % ch, "power", ch, "W", "%.2f"),
+              live("live.fan.%d.voltage" % ch, "voltage", ch, "V", "%.2f"),
+              live("live.fan.%d.current" % ch, "current", ch, "A", "%.3f")]
+    t += [live("live.sensor.%d" % n, "temp", n, "C", "%.2f") for n in range(1, 5)]
+    t += [live("live.virtual.%d" % n, "virtual", n, "C", "%.2f") for n in range(1, 17)]
+    t += [keys.Key("live.flow", keys.LIVE, lambda c: c.live.get("flow"), "number",
+                   unit="l/h", fmt="%.2f", settable=False)]
+    return t
 
 
 # ---------------------------------------------------------------- commands
@@ -930,6 +1036,7 @@ def build_parser(prefix):
     p.set_defaults(func=cmd_flow)
 
     # ----------------------------------------------- backup, restore, alias
+    keys.register(sub, prefix)
     core.add_backup_restore(sub, sys.modules[__name__])
     core.add_alias(sub, prefix)
     return ap

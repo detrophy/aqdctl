@@ -512,6 +512,136 @@ def info_rgb(buf, layout, names, source_label):
     print("  and remove one with 'rgb remove controller N'.")
 
 
+# -------------------------------------------------------------------- keys
+
+def effect_word(mode):
+    """An effect as --effect takes it: its name with underscores, or its id."""
+    name = RGB_MODES.get(mode)
+    return name.replace(" ", "_") if name else "%#04x" % mode
+
+
+def colour_hex(buf, layout, index, entry):
+    return "%02X%02X%02X" % hsv_to_rgb(*read_entry(buf, layout, index, entry))
+
+
+def colours_in_use(buf, layout, index):
+    """The palette entries an effect's colours occupy: [entry, ...]. The length
+    is the effect's colour count where it keeps one, else its fixed number."""
+    base = layout.slot_base(index)
+    mode = buf[base + RGB_MODE]
+    has_bg, _lo, hi = RGB_PALETTE_SPEC.get(mode, (False, 0, 0))
+    first = RGB_PALETTE_START.get(mode, 0) + (1 if has_bg else 0)
+    labels = RGB_PARAM_NAMES.get(mode, [])
+    if RGB_COUNT_PARAM in labels:
+        n = get_param(buf, base, labels.index(RGB_COUNT_PARAM))
+    elif mode in RGB_DERIVED_COUNT:
+        key, offset = RGB_DERIVED_COUNT[mode]
+        n = get_param(buf, base, labels.index(key)) - offset
+    else:
+        n = hi
+    n = max(0, min(n, hi, RGB_PALETTE_ENTRIES - first))
+    return list(range(first, first + n))
+
+
+def _controller_keys(c, kind, index, template=False):
+    """The keys of one controller in use. With `template`, the generic set the
+    schema lists, under N and NAME."""
+    from . import keys
+    layout = kind.RGB
+    p = "rgb.controller.%s" % ("N" if template else index)
+    base = None if template else layout.slot_base(index)
+
+    def key(name, read, type, **kw):
+        return keys.Key("%s.%s" % (p, name), keys.SETTINGS, read, type, **kw)
+
+    def byte(name, offset, **kw):
+        return key(name, lambda c: c.settings[base + offset], "integer", fmt="%d", **kw)
+
+    def word(name, offset, **kw):
+        return key(name, lambda c: core.be16(c.settings, base + offset), "integer",
+                   fmt="%d", **kw)
+
+    def flag(name, offset, bit):
+        return key(name, lambda c: bool(c.settings[base + offset] & bit), "on/off")
+
+    def param(name, k, settable):
+        return key(name, lambda c: get_param(c.settings, base, k), "integer", fmt="%d",
+                   low=0, high=0xFFFF, settable=settable)
+
+    def source(c):
+        value = core.be16(c.settings, base + RGB_SOURCE)
+        return "none" if value == RGB_SOURCE_NONE else kind.source_short(value)
+
+    def colours(c):
+        return [colour_hex(c.settings, layout, index, e)
+                for e in colours_in_use(c.settings, layout, index)]
+
+    effects = [effect_word(m) for m in sorted(RGB_MODES)
+               if m not in RGB_MODES_UNIMPLEMENTED]
+    out = [byte("channel", RGB_PORT, settable=False),
+           key("pos", lambda c: "%d-%d" % controller_span(c.settings, layout, index)[1:],
+               "leds"),
+           key("effect", lambda c: effect_word(c.settings[base + RGB_MODE]), "choice",
+               choices=effects)]
+    # The template shows every key an effect may have; a controller only those
+    # of its effect.
+    mode = None if template else c.settings[base + RGB_MODE]
+    has_bg, _lo, most = (True, 1, RGB_PALETTE_ENTRIES) if template else \
+        RGB_PALETTE_SPEC.get(mode, (False, 0, 0))
+    if most:
+        out.append(key("colours", colours, "colours"))
+    if has_bg:
+        entry = RGB_PALETTE_START.get(mode, 0)
+        out.append(key("background",
+                       lambda c: colour_hex(c.settings, layout, index, entry), "colour"))
+    # Parameters by name. The ones that follow from the colours, or that the
+    # effect does not let move, are read-only; unnamed words are listed where
+    # they hold something.
+    derived = set(RGB_PARAM_FIXED.get(mode, ())) | {RGB_COUNT_PARAM}
+    if mode in RGB_DERIVED_COUNT:
+        derived.add(RGB_DERIVED_COUNT[mode][0])
+    labels = ["NAME"] if template else RGB_PARAM_NAMES.get(mode, [])
+    for k in range(RGB_PARAM_WORDS):
+        label = labels[k] if k < len(labels) else ""
+        if label or not template and get_param(c.settings, base, k):
+            out.append(param("param.%s" % (label or k), k, label not in derived))
+    flags = {"NAME": 0} if template else RGB_FLAG_NAMES.get(mode, {})
+    out += [flag("flag." + name, RGB_FLAGS_OFFSET, bit)
+            for name, bit in sorted(flags.items())]
+    out += [flag("flag." + name, RGB_SOURCE_FLAGS, bit)
+            for name, bit in sorted(RGB_SOURCE_FLAG_NAMES.items())]
+    out += [key("sensor", source, "source"),
+            byte("filter-rise", RGB_FILTER_RISE, low=0, high=255),
+            byte("filter-fall", RGB_FILTER_FALL, low=0, high=255)]
+    for what, (low, high, out_min, out_max) in zip(("speed", "brightness"), RGB_MAPS):
+        m = "map.%s." % what
+        out += [word(m + "input-min", low, settable=False),
+                word(m + "input-max", high, settable=False),
+                byte(m + "output-min", out_min, settable=False),
+                byte(m + "output-max", out_max, settable=False)]
+    return out
+
+
+def key_table(kind):
+    """rgb.switch, rgb.brightness, and rgb.controller.N.* for each controller in
+    use. The brightness is a percentage with two decimals, which is enough to
+    land on the same byte again for all 256 of them."""
+    from . import keys
+    layout = kind.RGB
+
+    def controllers(c):
+        return [k for i in range(1, layout.count + 1)
+                if controller_span(c.settings, layout, i) is not None
+                for k in _controller_keys(c, kind, i)]
+    return [keys.Key("rgb.switch", keys.SETTINGS,
+                     lambda c: c.settings[layout.enable] == RGB_ENABLE_ON, "on/off"),
+            keys.Key("rgb.brightness", keys.SETTINGS,
+                     lambda c: c.settings[layout.brightness] * 100.0 / 255, "number",
+                     unit="%", fmt="%.2f", low=0, high=100),
+            keys.Family("rgb.controller", controllers,
+                        _controller_keys(None, kind, 1, template=True))]
+
+
 # ---------------------------------------------------------------- commands
 
 def _lookup_effect(text):

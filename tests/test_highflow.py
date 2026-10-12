@@ -1554,6 +1554,192 @@ finally:
     shutil.rmtree(tmp)
 check("list and aliases: one line per device, aliases unique, never serial-shaped", bad)
 
+# ------------------------------------------------------------ keys and get
+# The key names are the contract scripts build on, so the list is pinned; every
+# capture reads under every key; only the reports a request needs are read.
+import json
+from aqdctl import keys
+
+TABLE = highflow.key_table()
+
+
+def all_keys(stem):
+    ctx = keys.Context(highflow, SERIAL, FakeHighflow(stem))
+    return keys.read(TABLE, ctx)
+
+
+def leaf_clashes(names):
+    """Names that are a whole-part prefix of another name."""
+    ordered = sorted(names)
+    return [a for a, b in zip(ordered, ordered[1:]) if b.startswith(a + ".")]
+
+
+bad = []
+for stem in STEMS:
+    try:
+        rows = all_keys(stem)
+        for k, v in rows:
+            k.text(v)
+        json.dumps({k.name: k.json(v) for k, v in rows})
+        clash = leaf_clashes([k.name for k, _v in rows])
+        if clash:
+            bad.append("%s: %s is the prefix of another key" % (stem, clash[0]))
+    except Exception as exc:
+        bad.append("%s: %s: %s" % (stem, type(exc).__name__, exc))
+pinned = [line.strip() for line in open(os.path.join(HERE, "keys-highflow.txt"))
+          if line.strip() and not line.startswith("#")]
+listed = [k.name for k in keys.schema(TABLE)]
+if listed != pinned:
+    gone, new = sorted(set(pinned) - set(listed)), sorted(set(listed) - set(pinned))
+    bad.append("the key list differs from keys-highflow.txt: gone %s, new %s, or reordered"
+               % (gone, new))
+if leaf_clashes(listed):
+    bad.append("%s is the prefix of another key" % leaf_clashes(listed)[0])
+check("keys: all %d captures read under every key, the list is the pinned one" % len(STEMS),
+      bad)
+
+# values, against what the captures are known to hold
+bad = []
+values = {k.name: k.text(v) for k, v in all_keys(BY_NUMBER[8])}
+live = highflow.decode_live(LIVE[0])
+for key, want in (("device.serial", SERIAL), ("device.type", "highflow"),
+                  ("device.firmware", "1017"),
+                  ("flow.calibration.corrections", "-1,1,1,0,0,0,0,0,0,0"),
+                  ("flow.calibration.points", "20,30,50,70,100,125,150,200,250,300"),
+                  ("display.page-change", "5"), ("alarm.flow.limit", "45.0"),
+                  ("live.flow", "%.1f" % live["flow"]), ("live.external", ""),
+                  ("live.volume", "%d" % live["volume"]),
+                  ("name.sensor.internal", names.decode(capture(BY_NUMBER[8], 8),
+                                                        highflow.NAME_GROUPS)["sensor"][0])):
+    if values.get(key) != want:
+        bad.append("%s=%r, expected %r" % (key, values.get(key), want))
+# colours: as many as the effect keeps, here a gradient's limits + 1; the
+# parameters that follow from them, or that cannot move, are read-only
+gradients = 0
+for stem in STEMS:
+    rows = dict((k.name, (k, v)) for k, v in all_keys(stem))
+    for name, (k, limits) in rows.items():
+        if name.endswith(".param.limits"):
+            gradients += 1
+            p = name[:-len("limits")]
+            colours = rows[p[:-len("param.")] + "colours"][1]
+            if len(colours) != limits + 1:
+                bad.append("%s %s: %d colours for %d limits"
+                           % (stem, name, len(colours), limits))
+            access = [(n, rows[p + n][0].settable) for n in ("start", "end", "limits", "limit1")]
+            if access != [("start", False), ("end", False), ("limits", False), ("limit1", True)]:
+                bad.append("%s: settable %r" % (stem, access))
+if not gradients:
+    bad.append("no capture holds a gradient")
+# every capture: the keys say what the decoder says
+for stem in STEMS:
+    d = highflow.decode(capture(stem))
+    rows = dict((k.name, k.text(v)) for k, v in all_keys(stem))
+    want = {"display.units.flow": highflow.FLOW_UNITS.get(d["flow_unit"]),
+            "flow.coolant": highflow.COOLANT_CHOICES[d["coolant"]],
+            "sensor.offset.external": "%.2f" % (d["offset_external"] / 100.0),
+            "sensor.water-quality.bad": "%.1f" % (d["water_quality_bad"] / 10.0),
+            "system.usb-current": "%d" % d["usb_current"],
+            "alarm.startup-delay": "%d" % d["alarm_delay"]}
+    for n in range(1, highflow.CHART_COUNT + 1):
+        want["display.chart.%d.source" % n] = \
+            highflow.CHART_SOURCES[d["chart%d_source" % n]].replace(" ", "-")
+        want["display.chart.%d.interval" % n] = \
+            "%g" % highflow.CHART_INTERVALS[d["chart%d_interval" % n]]
+    for a in highflow.ALARMS:
+        want["alarm.%s.state" % a.key] = "on" if d["alarm_" + a.key] else "off"
+        want["alarm.%s.limit" % a.key] = a.fmt % (d["limit_" + a.key] / a.scale)
+    for key, value in sorted(want.items()):
+        if rows.get(key) != value:
+            bad.append("%s: %s=%r, the decoder says %r" % (stem, key, rows.get(key), value))
+# a parameter word the effect does not name is listed, by number, where it holds something
+fake = FakeHighflow()
+settings = fake.blobs[core.CTRL_REPORT_ID]
+slot = highflow.RGB.slot_base(1)
+settings[slot + rgbpx.RGB_MODE] = 0x01                     # static: no named words
+rgbpx.set_param(settings, slot, 3, 42)
+core.reseal(settings)
+rows = dict((k.name, k) for k in keys.select(TABLE, keys.Context(highflow, SERIAL, fake),
+                                             ["rgb.controller.1.param"]))
+if list(rows) != ["rgb.controller.1.param.3"] or not rows["rgb.controller.1.param.3"].settable:
+    bad.append("unnamed words: %r" % list(rows))
+check("keys: values as the captures hold them, written as the commands take them", bad)
+
+
+class Counting(FakeHighflow):
+    """Records every report read."""
+    def __init__(self, *a, **kw):
+        FakeHighflow.__init__(self, *a, **kw)
+        self.reads = []
+
+    def read(self, report_id=core.CTRL_REPORT_ID, check=True):
+        self.reads.append(report_id)
+        return FakeHighflow.read(self, report_id, check)
+
+    def read_input(self, size, timeout_ms=0):
+        self.reads.append(1)
+        return FakeHighflow.read_input(self, size, timeout_ms)
+
+
+bad = []
+for prefixes, want in ((["device.serial"], []), (["display"], [3]), (["name"], [8]),
+                       (["live"], [1]), (["live.flow", "device.firmware"], [1]),
+                       (["alarm", "display", "rgb"], [3]), ([], [3, 1, 8])):
+    fake = Counting()
+    with keys.Context(highflow, SERIAL, fake, opened=False) as ctx:
+        keys.read(TABLE, ctx, prefixes)
+    if sorted(fake.reads) != sorted(want):
+        bad.append("get %s read %r, expected %r" % (" ".join(prefixes), fake.reads, want))
+check("keys: a request reads only the reports its keys need, each once", bad)
+
+# 'get' through the command line
+bad = []
+discovery.attached = lambda: both
+core.Device = own_serial
+try:
+    status, out, err = run_cli(["--device", HFN, "get", "alarm.flow"])
+    if (status, out) != (0, "alarm.flow.state=off\nalarm.flow.limit=45.0\n"):
+        bad.append("get alarm.flow: %r %r" % (status, out))
+    status, out, err = run_cli(["--device", HFN, "get", "--value", "live.flow"])
+    if (status, out) != (0, "%.1f\n" % live["flow"]):
+        bad.append("get --value live.flow: %r %r" % (status, out))
+    status, out, err = run_cli(["--device", HFN, "get", "--json", "display.pages",
+                                "live.external"])
+    if json.loads(out) != {"display.pages": [2, 3], "live.external": None}:
+        bad.append("get --json: %r" % out)
+    status, out, err = run_cli(["--device", HFN, "get", "--json", "--value", "alarm.flow"])
+    if json.loads(out) != [False, 45]:
+        bad.append("get --json --value: %r" % out)
+    status, out, err = run_cli(["--device", HFN, "get", "--keys", "rgb.controller.3.param"])
+    if not out.startswith("rgb.controller.N.param.NAME  integer") or out.count("\n") != 1:
+        bad.append("get --keys rgb.controller.3.param: %r" % out)
+    status, out, err = run_cli(["--device", HFN, "get", "--keys", "--json",
+                                "display.brightness"])
+    if json.loads(out) != [{"key": "display.brightness", "type": "choice", "settable": True,
+                            "choices": ["high", "medium", "low"]}]:
+        bad.append("get --keys --json: %r" % out)
+    for argv in (["get", "nosuch"], ["get", "live.flo"], ["get", "rgb.controller.5"],
+                 ["get", "--keys", "nosuch"]):
+        status, out, err = run_cli(["--device", HFN] + argv)
+        if status != core.EXIT_INVALID or out or "No key" not in err:
+            bad.append("%s: %r %r %r" % (" ".join(argv), status, out, err))
+finally:
+    discovery.attached, core.Device = real_attached, real_device
+check("get: key=value lines, --value, --json, --keys; a prefix matching nothing exits 1",
+      bad)
+
+# rgb.brightness has two decimals: enough for every byte to come back as itself
+bad = []
+for byte in range(256):
+    fake = FakeHighflow()
+    fake.blobs[core.CTRL_REPORT_ID][highflow.RGB_BRIGHTNESS] = byte
+    core.reseal(fake.blobs[core.CTRL_REPORT_ID])
+    (k, v), = keys.read(TABLE, keys.Context(highflow, SERIAL, fake), ["rgb.brightness"])
+    out, err, code = do(fake, "rgb brightness %s -y" % k.text(v))
+    if code is not None or fake.written:
+        bad.append("byte %d -> %s -> written %r" % (byte, k.text(v), fake.written[:1]))
+check("rgb.brightness: all 256 bytes survive the percentage", bad[:3])
+
 # Every write above backed up into BACKUPS, never the real data directory.
 core.data_dir = real_data_dir
 shutil.rmtree(BACKUPS)

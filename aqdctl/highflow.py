@@ -8,12 +8,13 @@ raw rather than guessed. The rgb and name tables are the shared ones from
 rgbpx and names, pointed at this device's layout."""
 
 import argparse
+import functools
 import os
 import struct
 import sys
 import textwrap
 
-from . import core, names, rgbpx
+from . import core, keys, names, rgbpx
 from .core import be16
 
 NAME = "highflow"
@@ -99,6 +100,9 @@ WATER_QUALITY_BAD = 0x294   # u16: conductivity at 0 %, 0.1 uS/cm
 
 COOLANTS = {0: "DP Ultra", 1: "distilled water"}
 CONNECTORS = {0: "inner diameter over 7 mm", 1: "inner diameter under 7 mm"}
+# The same, as the commands take them.
+COOLANT_CHOICES = {0: "dp-ultra", 1: "distilled"}
+CONNECTOR_CHOICES = {0: "over-7mm", 1: "under-7mm"}
 
 # --- report 0x03, alarms
 ALARM_ACTIONS = 0x29A       # bits, ALARM_ACTION_BITS; 0x01-0x10 unknown
@@ -175,6 +179,11 @@ RGB_SOURCE_HELP = "'#N' for a raw source index, or 'none' (the high flow NEXT's 
 
 def source_label(index):
     return "source #%d" % index
+
+
+def source_short(index):
+    """A data source as --sensor takes it."""
+    return "#%d" % index
 
 
 def parse_sensor(spec):
@@ -382,6 +391,111 @@ def read_live(dev, settings=None):
     the current settings report, lets the fallback calibrate its flow."""
     buf = dev.read_input(INPUT_REPORT_SIZE, 1500)
     return decode_live(buf) if buf else read_live_hwmon(dev.serial, settings)
+
+
+# -------------------------------------------------------------------- keys
+
+def live_for_keys(ctx):
+    """The live readings for live.* keys: report 0x01, the same one
+    device.firmware is read from, or the kernel driver's."""
+    if ctx.input:
+        return decode_live(ctx.input)
+    return read_live_hwmon(ctx.serial, ctx.settings)
+
+
+@functools.lru_cache(maxsize=None)
+def key_table():
+    S = keys.SETTINGS
+    t = keys.identity(sys.modules[__name__]) + [keys.firmware()]
+
+    t += [keys.choice("display.brightness", BRIGHTNESS, BRIGHTNESS_LEVELS),
+          keys.choice("display.idle-brightness", IDLE_BRIGHTNESS, IDLE_LEVELS),
+          keys.Key("display.pages", S, lambda c: list(decode(c.settings)["pages"]),
+                   "numbers", fmt="%d", low=1, high=16),
+          keys.integer("display.page-change",
+                       lambda c: "off" if c.settings[PAGE_INTERVAL] == PAGE_CHANGE_OFF
+                       else c.settings[PAGE_INTERVAL], unit="s", low=3, high=60,
+                       choices=["off"])]
+    t += [keys.switch("display.%s" % key, DISPLAY_FLAGS, DISPLAY_BITS[bit], inverted)
+          for key, bit, inverted in (("rotate", "rotate", False),
+                                     ("invert", "invert", False),
+                                     ("auto-invert", "auto-invert", False),
+                                     ("device-keys", "device-keys-disabled", True),
+                                     ("menu-lock", "menu-lock", False))]
+    t += [keys.choice("display.units.temperature", TEMPERATURE_UNIT, TEMPERATURE_UNITS),
+          keys.choice("display.units.flow", FLOW_UNIT, FLOW_UNITS)]
+    sources = {v: k for k, v in CHART_SOURCE_BY_NAME.items()}
+
+    def chart_source(offset):
+        return lambda c: keys.named(sources, be16(c.settings, offset))
+
+    def chart_interval(offset):
+        return lambda c: keys.named(CHART_INTERVALS, be16(c.settings, offset))
+    for n in range(1, CHART_COUNT + 1):
+        base = CHARTS + 4 * (n - 1)
+        t += [keys.Key("display.chart.%d.source" % n, S, chart_source(base), "choice",
+                       choices=[sources[k] for k in sorted(sources)]),
+              keys.Key("display.chart.%d.interval" % n, S, chart_interval(base + 2),
+                       "number", unit="s", choices=sorted(CHART_INTERVALS.values()))]
+
+    t += [keys.choice("flow.coolant", COOLANT, COOLANT_CHOICES),
+          keys.choice("flow.connector", CONNECTOR, CONNECTOR_CHOICES),
+          keys.Key("flow.calibration.points", S,
+                   lambda c: [p / 10.0 for p in decode(c.settings)["calibration_points"]],
+                   "numbers", unit="l/h", low=POINT_MIN, high=POINT_MAX),
+          keys.Key("flow.calibration.corrections", S,
+                   lambda c: [v / 100.0 for v in decode(c.settings)["calibration"]],
+                   "numbers", unit="%", low=-CALIBRATION_LIMIT, high=CALIBRATION_LIMIT)]
+
+    t += [keys.number("sensor.offset.internal", OFFSET_INTERNAL, 100.0, "%.2f", "C",
+                      -15, 15, signed=True),
+          keys.number("sensor.offset.external", OFFSET_EXTERNAL, 100.0, "%.2f", "C",
+                      -15, 15, signed=True),
+          keys.number("sensor.water-quality.good", WATER_QUALITY_GOOD, 10.0, "%.1f",
+                      "uS/cm"),
+          keys.number("sensor.water-quality.bad", WATER_QUALITY_BAD, 10.0, "%.1f",
+                      "uS/cm")]
+
+    for a in ALARMS:
+        t += [keys.switch("alarm.%s.state" % a.key, ALARM_ENABLE, a.bit),
+              keys.number("alarm.%s.limit" % a.key, a.offset, a.scale, a.fmt, a.unit,
+                          a.lo, a.hi)]
+    t += [keys.integer("alarm.startup-delay", lambda c: c.settings[ALARM_DELAY], "s",
+                       *ALARM_DELAY_RANGE)]
+    t += [keys.switch("alarm.%s" % key, ALARM_ACTIONS, bit)
+          for key, bit in ALARM_ACTION_BITS.items()]
+    t += [keys.choice("signal-output", SIGNAL_OUTPUT,
+                      {mode: cli for mode, (cli, _text) in SIGNAL_MODES.items()})]
+
+    t += [keys.integer("system.usb-current", lambda c: be16(c.settings, USB_CURRENT),
+                       "mA", USB_SPEC_LIMIT, USB_MAX)]
+    t += [keys.switch("system.standby.%s" % key, STANDBY, bit)
+          for key, bit in STANDBY_BITS.items()]
+    t += [keys.switch("system.in-standby.%s" % key, STANDBY, bit)
+          for key, bit in IN_STANDBY_BITS.items()]
+    t += [keys.integer("system.aquabus-address", lambda c: c.settings[AQUABUS_ADDRESS],
+                       low=58, high=61)]
+
+    t += rgbpx.key_table(sys.modules[__name__])
+    t += names.key_table(NAME_GROUPS)
+
+    L = keys.LIVE
+    for key, field, fmt, unit in (("flow", "flow", "%.1f", "l/h"),
+                                  ("flow-raw", "flow_raw", "%.1f", "l/h"),
+                                  ("internal", "internal", "%.2f", "C"),
+                                  ("external", "external", "%.2f", "C"),
+                                  ("water-quality", "water_quality", "%.2f", "%"),
+                                  ("power", "power", "%g", "W"),
+                                  ("conductivity", "conductivity", "%.1f", "uS/cm"),
+                                  ("vcc5", "vcc5", "%.2f", "V"),
+                                  ("vcc5-usb", "vcc5_usb", "%.2f", "V"),
+                                  ("volume", "volume", "%d", "l"),
+                                  ("impulses", "impulses", "%d", ""),
+                                  ("since-reset", "since_reset", "%d", "s")):
+        t.append(keys.Key("live." + key, L, (lambda f: lambda c: c.live.get(f))(field),
+                          "integer" if fmt == "%d" else "number", unit=unit, fmt=fmt,
+                          settable=False))
+    return t
 
 
 # ------------------------------------------------------------------ output
@@ -1232,9 +1346,9 @@ def build_parser(prefix):
     flow.set_defaults(_helper=flow)
     fsub = flow.add_subparsers(dest="flowcmd")
     _choice(fsub, "coolant", "the coolant in the loop", COOLANT,
-            {0: "dp-ultra", 1: "distilled"}, "flow coolant")
+            COOLANT_CHOICES, "flow coolant")
     _choice(fsub, "connector", "the inner diameter of the connectors", CONNECTOR,
-            {0: "over-7mm", 1: "under-7mm"}, "flow connector")
+            CONNECTOR_CHOICES, "flow connector")
     p = writer(fsub.add_parser(
         "calibration", formatter_class=core.HelpFormatter,
         help="the ten flow rates and the correction at each",
@@ -1410,6 +1524,7 @@ def build_parser(prefix):
     names.register(sub, sys.modules[__name__], prefix)
 
     # ----------------------------------------------- backup, restore, alias
+    keys.register(sub, prefix)
     core.add_backup_restore(sub, sys.modules[__name__])
     core.add_alias(sub, prefix)
     return ap

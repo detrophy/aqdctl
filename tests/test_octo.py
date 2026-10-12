@@ -47,6 +47,8 @@ class FakeOcto:
         assert stored == computed, "wrote a report with a stale checksum"
         self.written.append(bytes(buf))
         self.blobs[buf[0]] = bytes(buf)
+    def read_input(self, size, timeout_ms=0):
+        return None                     # no input report was captured
 
 
 def _quiet(fn, args):
@@ -1301,6 +1303,134 @@ if bad:
 else:
     print("  ok    flow header: 0.01 l/h through the kernel driver")
 
-total = len(CASES) + 43
+# ------------------------------------------------------------ keys and get
+# The key list is pinned, every fixture reads under every key, and the values
+# are what the fixtures' names say they hold.
+import glob, json
+from aqdctl import keys
+
+
+def report(path):
+    return open(path, "rb").read()
+
+
+def fixture_keys(stem):
+    fake = FakeOcto(report(os.path.join(FIX, stem + ".bin")))
+    fake.blobs[m.LABEL_REPORT_ID] = report(os.path.join(FIX, stem + "-08.bin"))
+    return keys.read(octo.key_table(), keys.Context(octo, SERIAL, fake))
+
+
+def leaf_clashes(names):
+    ordered = sorted(names)
+    return [a for a, b in zip(ordered, ordered[1:]) if b.startswith(a + ".")]
+
+
+def outcome(label, bad):
+    if bad:
+        failures.append((label, "; ".join(bad)))
+        print("  FAIL  %s: %s" % (label, "; ".join(bad)))
+    else:
+        print("  ok    %s" % label)
+
+
+bad = []
+stems = sorted(os.path.basename(p)[:-4] for p in glob.glob(os.path.join(FIX, "[0-9]*.bin"))
+               if not p.endswith("-08.bin") and os.path.exists(p[:-4] + "-08.bin"))
+real_config = core.config_path
+with tempfile.TemporaryDirectory() as tmp:
+    core.config_path = lambda: os.path.join(tmp, "config.json")
+    try:
+        for stem in stems:
+            try:
+                rows = fixture_keys(stem)
+                json.dumps({k.name: k.json(v) for k, v in rows})
+                for k, v in rows:
+                    k.text(v)
+                clash = leaf_clashes([k.name for k, _v in rows])
+                if clash:
+                    bad.append("%s: %s is a prefix" % (stem, clash[0]))
+            except Exception as exc:
+                bad.append("%s: %s: %s" % (stem, type(exc).__name__, exc))
+    finally:
+        core.config_path = real_config
+pinned = [line.strip() for line in open(os.path.join(HERE, "keys-octo.txt"))
+          if line.strip() and not line.startswith("#")]
+listed = [k.name for k in keys.schema(octo.key_table())]
+if listed != pinned:
+    bad.append("the key list differs from keys-octo.txt: gone %s, new %s, or reordered"
+               % (sorted(set(pinned) - set(listed)), sorted(set(listed) - set(pinned))))
+if leaf_clashes(listed):
+    bad.append("%s is the prefix of another key" % leaf_clashes(listed)[0])
+outcome("keys: all %d fixtures read under every key, the list is the pinned one" % len(stems),
+        bad)
+
+bad = []
+for stem, want in (("21-fan-ch6-follows-ch3", {"fan.6.mode": "follow", "fan.6.follow": "3",
+                                               "fan.3.mode": "target", "fan.3.follow": ""}),
+                   ("13-fan-ch7-curve-automatic-setup", {"fan.7.mode": "curve",
+                                                         "fan.7.curve.startup": "28.79"}),
+                   ("24-rgb-brightness-45", {"rgb.brightness": "44.71"}),
+                   ("39-name-fan7-with-umlaut", {"name.fan.7": "h\xf6ren"}),
+                   ("15-profile-2-loaded", {"device.profile": "2"}),
+                   ("17-fan-ch3-source-sensor-changed", {"fan.3.sensor": "2"}),
+                   ("40-fan-pid-presets-ch3-to-ch6", {
+                       "fan.3.pid.p": "2500", "fan.3.pid.i": "2000", "fan.3.pid.d": "500",
+                       "fan.3.pid.reset": "1", "fan.3.pid.hysteresis": "0.1"}),
+                   ("06-rgb-wave-with-data-source", {
+                       "rgb.controller.7.effect": "wave", "rgb.controller.7.pos": "61-79",
+                       "rgb.controller.7.colours": "FF8000",
+                       "rgb.controller.7.background": "DD30A8",
+                       "rgb.controller.7.param.speed": "30",
+                       "rgb.controller.7.flag.reverse": "on",
+                       "rgb.controller.7.sensor": "1"})):
+    values = {k.name: k.text(v) for k, v in fixture_keys(stem)}
+    for key, value in want.items():
+        if values.get(key) != value:
+            bad.append("%s: %s=%r, expected %r" % (stem, key, values.get(key), value))
+points = dict((k.name, v) for k, v in fixture_keys("13-fan-ch7-curve-automatic-setup"))
+if points["fan.7.curve.points"] != m.read_curve(report(os.path.join(
+        FIX, "13-fan-ch7-curve-automatic-setup.bin")), 7):
+    bad.append("fan.7.curve.points is not the stored curve")
+outcome("keys: values as the fixtures hold them, written as the commands take them", bad)
+
+# live keys come from the kernel driver and need no access to the device
+bad = []
+
+
+class Closed(FakeOcto):
+    """A device that must not be opened."""
+    def __enter__(self):
+        raise AssertionError("the device was opened")
+
+
+with tempfile.TemporaryDirectory() as tmp:
+    for leaf, text in (("fan1_input", "3966"), ("power1_input", "1500000"),
+                       ("in0_input", "11930"), ("curr1_input", "125"),
+                       ("temp1_input", "24020"), ("fan9_input", "19115")):
+        with open(os.path.join(tmp, leaf), "w") as fh:
+            fh.write(text + "\n")
+    real_hwmon, real_config = discovery.hwmon_dir, core.config_path
+    discovery.hwmon_dir = lambda serial: tmp
+    core.config_path = lambda: os.path.join(tmp, "config.json")
+    try:
+        core.set_protected(SERIAL, {1})
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            keys.cmd_get(Closed(), argparse.Namespace(
+                prefix=["live.fan.1", "live.sensor.1", "live.virtual.1", "live.flow",
+                        "fan.1.protect", "fan.2.protect"],
+                keys=False, json=False, value=False))
+    except Exception as exc:
+        out = io.StringIO("%s: %s" % (type(exc).__name__, exc))
+    finally:
+        discovery.hwmon_dir, core.config_path = real_hwmon, real_config
+want = ("fan.1.protect=on\nfan.2.protect=off\nlive.fan.1.rpm=3966\nlive.fan.1.power=1.50\n"
+        "live.fan.1.voltage=11.93\nlive.fan.1.current=0.125\nlive.sensor.1=24.02\n"
+        "live.virtual.1=\nlive.flow=191.15\n")
+if out.getvalue() != want:
+    bad.append("got:\n" + out.getvalue())
+outcome("get: live readings and protected channels without opening the device", bad)
+
+total = len(CASES) + 46
 print("\n%d/%d passed" % (total - len(failures), total))
 sys.exit(1 if failures else 0)

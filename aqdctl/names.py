@@ -52,6 +52,15 @@ def decode(buf, groups):
             for g in groups}
 
 
+def key_table(groups):
+    """name.GROUP.SLOT for every slot, e.g. name.sensor.internal or name.fan.3."""
+    from . import keys
+    return [keys.Key("name.%s.%s" % (g.cli, g.label(i)), keys.NAMES,
+                     (lambda offset: lambda c: read_name(c.names, offset))(g.slot(i)),
+                     "text")
+            for g in groups for i in range(1, g.count + 1)]
+
+
 def _group(kind, cli):
     for g in kind.NAME_GROUPS:
         if g.cli == cli:
