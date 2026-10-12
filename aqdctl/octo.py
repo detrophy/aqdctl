@@ -258,7 +258,7 @@ def write_curve(buf, ch, points):
 
 def info_fan(buf, names, live):
     st = decode(buf)
-    print("FAN CHANNELS  (8 headers)")
+    print("fan  (8 headers)")
     print("  ch  name             mode         setpoint  target  sensor   rpm"
           "   boost  hold    min     max  fallback")
     print("  --  ---------------  -----------  --------  ------  ------  -----"
@@ -295,17 +295,12 @@ def info_fan(buf, names, live):
             print("      pid %s  (P %d  I %d  D %d  reset %gs  hysteresis %gK)"
                   % (preset if preset else "custom", tuning[0], tuning[1],
                      tuning[2], tuning[3], tuning[4]))
-    print()
-    print("  'setpoint' is the stored fixed speed. It is what hwmon pwmN reads, and")
-    print("  it is only what the channel actually runs at in fixed mode.")
-    print("  'sensor' is the number you would pass to --sensor.")
-    print("  Read a channel's full curve with 'fan set <ch> mode curve', and its")
-    print("  bar-graph maximum with 'fan set <ch> max-rpm'.")
+
 
 
 def info_sensor(buf, names, live):
     st = decode(buf)
-    print("SENSORS  (4 temperature headers, 1 flow header)")
+    print("sensor  (4 temperature headers, 1 flow header)")
     print("  ch  name             offset    reading")
     print("  --  ---------------  --------  -------")
     for i in range(4):
@@ -315,11 +310,8 @@ def info_sensor(buf, names, live):
                  "-" if value is None else "%.2f C" % value))
     print()
     flow = live.get("flow")
-    print("  flow: %d impulses/litre    reading: %s"
-          % (st["flow_pulses"], "-" if flow is None else "%.2f l/h" % flow))
-    print()
-    print("  Offsets are stored on the device and survive a reboot; the reading")
-    print("  already has the offset applied.")
+    print("  %-18s %s" % ("flow", "-" if flow is None else "%.2f l/h" % flow))
+    print("  %-18s %d per litre" % ("flow impulses", st["flow_pulses"]))
 
 
 def parse_sensor(spec):
@@ -771,6 +763,16 @@ def key_table():
 
 # ---------------------------------------------------------------- commands
 
+INFO_NOTES = """\
+fan: 'setpoint' is the stored fixed power. It is what hwmon pwmN reads, and
+  it is only what the channel runs at in fixed mode. 'sensor' is the number
+  --sensor takes. 'fan set CH mode curve' prints a channel's full curve, and
+  'fan set CH max-rpm' its bar-graph maximum.
+sensor: offsets are stored on the device and survive a reboot; the readings
+  already include them.
+""" + rgbpx.INFO_NOTE
+
+
 def cmd_info(dev, args):
     """Everything the device is configured to do, plus what it is doing now."""
     buf = dev.read()
@@ -783,9 +785,10 @@ def cmd_info(dev, args):
     want = getattr(args, "section", None)
     sections = [want] if want else ["fan", "rgb", "sensor"]
 
-    print("%s %s   active profile %d%s"
-          % (TITLE, dev.serial, buf[PROFILE_INDEX],
-             "" if live else "   (kernel driver not loaded)"))
+    print("%s %s" % (TITLE, dev.serial))
+    print("  %-18s %d" % ("profile", buf[PROFILE_INDEX]))
+    print("  %-18s %s" % ("live readings", "the kernel driver" if live
+                          else "none: the kernel driver is not loaded"))
     for section in sections:
         print()
         if section == "fan":
@@ -866,10 +869,13 @@ def build_parser(prefix):
     writer = core.add_write_flags
 
     # ---------------------------------------------------------------- info
-    p = sub.add_parser("info", help="show configuration and live readings",
+    p = sub.add_parser("info", formatter_class=core.HelpFormatter,
+                       help="show configuration and live readings",
                        description="Print what the Octo is configured to do and, "
                                    "if the kernel driver is loaded, what it is "
-                                   "doing right now.")
+                                   "doing right now. For scripts, 'get' prints the "
+                                   "same as key=value lines.",
+                       epilog=INFO_NOTES)
     p.add_argument("section", nargs="?", choices=["fan", "rgb", "sensor"],
                    help="limit the output to one section (default: all three)")
     p.set_defaults(func=cmd_info)

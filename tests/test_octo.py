@@ -1337,7 +1337,7 @@ if live.get("flow") != 191.19:
 out = io.StringIO()
 with contextlib.redirect_stdout(out):
     m.info_sensor(BLOBS[m.CTRL_REPORT_ID], [""] * 4, live)
-if "reading: 191.19 l/h" not in out.getvalue():
+if "  flow               191.19 l/h\n" not in out.getvalue():
     bad.append("info shows:\n" + out.getvalue())
 if bad:
     failures.append(("flow unit", "; ".join(bad)))

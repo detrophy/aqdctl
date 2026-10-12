@@ -110,10 +110,6 @@ ALARM_ENABLE = 0x29B        # bits, one per alarm; 0x10-0x80 unknown
 ALARM_DELAY = 0x29D         # u8: alarms ignored for this long after startup, 5-100 s
 SIGNAL_OUTPUT = 0x2A6       # u8: SIGNAL_MODES
 ALARM_ACTION_BITS = {"buzzer": 0x80, "blink-led": 0x40, "stop-signal": 0x20}
-# Aquasuite's wording, for the output.
-ALARM_ACTION_TEXT = {"buzzer": "sound the buzzer",
-                     "blink-led": "blink the internal LED red",
-                     "stop-signal": "disable the fan speed/flow signal output"}
 
 
 class Alarm:
@@ -522,60 +518,65 @@ def chart_interval_text(stored):
     return "every %g s" % seconds if seconds is not None else "unknown interval (%d)" % stored
 
 
+def _line(label, value, indent=2, width=18):
+    print(("%s%-*s %s" % (" " * indent, width, label, value)).rstrip())
+
+
 def info_display(buf, s):
     print("display")
-    print("  brightness        %s, when idle: %s"
-          % (_name(BRIGHTNESS_LEVELS, s["brightness"]),
-             _name(IDLE_LEVELS, s["idle_brightness"])))
+    _line("brightness", _name(BRIGHTNESS_LEVELS, s["brightness"]))
+    _line("idle-brightness", _name(IDLE_LEVELS, s["idle_brightness"]))
     interval = s["page_interval"]
-    print("  page change       %s" % ("off" if interval == PAGE_CHANGE_OFF
-                                      else "every %d s" % interval))
-    print("  pages             %s" % (", ".join("%d %s" % (n, PAGE_NAMES[n])
-                                               for n in s["pages"]) or "none"))
-    print("  switches          rotate %s, invert %s, auto-invert %s, device-keys %s, "
-          "menu-lock %s"
-          % (_on(s["display_rotate"]), _on(s["display_invert"]),
-             _on(s["display_auto-invert"]), _on(not s["display_device-keys-disabled"]),
-             _on(s["display_menu-lock"])))
-    print("  units             %s, %s"
-          % (_name(TEMPERATURE_UNITS, s["temperature_unit"]),
-             _name(FLOW_UNITS, s["flow_unit"])))
-    for n in range(1, CHART_COUNT + 1):
-        print("  chart %d           %s, %s"
-              % (n, _name(CHART_SOURCES, s["chart%d_source" % n]),
-                 chart_interval_text(s["chart%d_interval" % n])))
+    _line("page-change", "off" if interval == PAGE_CHANGE_OFF else "every %d s" % interval)
+    _line("pages", ", ".join("%d %s" % (n, PAGE_NAMES[n]) for n in s["pages"]) or "none")
+    _line("rotate", _on(s["display_rotate"]))
+    _line("invert", _on(s["display_invert"]))
+    _line("auto-invert", _on(s["display_auto-invert"]))
+    _line("device-keys", _on(not s["display_device-keys-disabled"]))
+    _line("menu-lock", _on(s["display_menu-lock"]))
+    _line("temperature unit", _name(TEMPERATURE_UNITS, s["temperature_unit"]))
+    _line("flow unit", _name(FLOW_UNITS, s["flow_unit"]))
     unknown = buf[DISPLAY_FLAGS] & ~sum(DISPLAY_BITS.values())
     if unknown:
-        print("  unknown display bits %#04x" % unknown)
+        _line("unknown bits", "%#04x" % unknown)
+    print()
+    print("  chart  source                 interval")
+    for n in range(1, CHART_COUNT + 1):
+        stored = s["chart%d_interval" % n]
+        seconds = CHART_INTERVALS.get(stored)
+        print("  %-5d  %-22s %s" % (n, _name(CHART_SOURCES, s["chart%d_source" % n]),
+                                    "%g s" % seconds if seconds is not None
+                                    else "unknown (%d)" % stored))
 
 
 def info_flow(s, live):
     print("flow")
-    print("  now               %s" % _num(live.get("flow"), "%.1f", "l/h"))
-    print("  coolant           %s" % _name(COOLANTS, s["coolant"]))
-    print("  connector         %s" % _name(CONNECTORS, s["connector"]))
+    _line("now", _num(live.get("flow"), "%.1f", "l/h"))
+    _line("coolant", _name(COOLANTS, s["coolant"]))
+    _line("connector", _name(CONNECTORS, s["connector"]))
     corrections = ["%g l/h: %+.2f %%" % (point / 10.0, value / 100.0)
                    for point, value in zip(s["calibration_points"], s["calibration"])
                    if value]
-    print("  calibration       %s" % (", ".join(corrections) or "no corrections"))
-    print("  calibrated at     %s l/h"
-          % ", ".join("%g" % (p / 10.0) for p in s["calibration_points"]))
+    _line("calibration", ", ".join(corrections) or "no corrections")
+    _line("calibrated at", "%s l/h" % ", ".join("%g" % (p / 10.0)
+                                              for p in s["calibration_points"]))
     if live.get("volume") is not None:
-        print("  volume            %d l, %d impulses, %s since the last reset"
-              % (live["volume"], live["impulses"], _duration(live["since_reset"])))
+        _line("volume", "%d l" % live["volume"])
+        _line("impulses", "%d" % live["impulses"])
+        _line("since reset", _duration(live["since_reset"]))
     else:
-        print("  volume            needs report 0x01, which could not be read")
+        _line("volume", "needs report 0x01, which could not be read")
 
 
 def info_sensor(s, labels, live):
     sensor_names = dict(zip(SENSOR_MEMBERS, labels))
 
-    def row(key, reading, extra=""):
-        name = sensor_names.get(key, "")
+    def row(key, reading, extra="", name=None):
+        name = sensor_names.get(key, "") if name is None else name
         print(("  %-14s %-26s %-13s %s"
                % (key, '"%s"' % name if name else "-", reading, extra)).rstrip())
 
-    print("sensor           stored name                reading")
+    print("sensor           stored name                reading       settings")
     row("internal", _num(live.get("internal"), "%.2f", "C"),
         "offset %+.2f C" % (s["offset_internal"] / 100.0))
     row("external", _num(live.get("external"), "%.2f", "C", "no sensor"),
@@ -590,8 +591,8 @@ def info_sensor(s, labels, live):
         else _num(power, "%d", "W"))
     volume = live.get("volume")
     row("volume", "%d l" % volume if volume is not None else "no reading")
-    print("  supply         %s, USB %s"
-          % (_num(live.get("vcc5"), "%.2f", "V"), _num(live.get("vcc5_usb"), "%.2f", "V")))
+    row("supply", _num(live.get("vcc5"), "%.2f", "V"), name="")
+    row("usb supply", _num(live.get("vcc5_usb"), "%.2f", "V"), name="")
 
 
 def info_alarm(buf, s, live):
@@ -607,33 +608,35 @@ def info_alarm(buf, s, live):
                   "now " + alarm.fmt % reading + " " + alarm.unit
                   if reading is not None else "no reading",
                   "<- limit crossed" if crossed else "")).rstrip())
-    print("  after startup     alarms are ignored for %d s" % s["alarm_delay"])
-    actions = [ALARM_ACTION_TEXT[k] for k in ALARM_ACTION_BITS if s["alarm_" + k]]
-    print("  during an alarm   %s" % ("; ".join(actions) if actions else "no actions"))
-    unknown = buf[ALARM_ACTIONS] & ~sum(ALARM_ACTION_BITS.values())
-    if unknown:
-        print("                    unknown action bits %#04x" % unknown)
     unknown = buf[ALARM_ENABLE] & ~sum(a.bit for a in ALARMS)
     if unknown:
-        print("  unknown alarm bits %#04x" % unknown)
+        _line("unknown alarm bits", "%#04x" % unknown)
+    print()
+    _line("startup-delay", "%d s" % s["alarm_delay"])
+    for key in ALARM_ACTION_BITS:
+        _line(key, _on(s["alarm_" + key]))
+    unknown = buf[ALARM_ACTIONS] & ~sum(ALARM_ACTION_BITS.values())
+    if unknown:
+        _line("unknown action bits", "%#04x" % unknown)
     mode = s["signal_output"]
     cli, text = SIGNAL_MODES.get(mode, ("unknown", "mode %d" % mode))
-    print("  signal output     %s: %s" % (cli, text))
+    _line("signal-output", "%s: %s" % (cli, text))
 
 
 def info_system(buf, s):
     print("system")
-    print("  USB current limit %d mA%s"
-          % (s["usb_current"], ", above the USB limit allowed" if s["usb_over_spec"]
-             else ""))
-    print("  aquabus address   %d" % s["aquabus_address"])
-    print("  standby allowed   %s" % ", ".join("%s %s" % (k, _on(s["standby_" + k]))
-                                              for k in STANDBY_BITS))
-    print("  in standby        %s" % ", ".join("%s %s" % (k, _on(s["standby_" + k]))
-                                              for k in IN_STANDBY_BITS))
+    _line("usb-current", "%d mA%s" % (s["usb_current"], ", above the USB limit allowed"
+                                      if s["usb_over_spec"] else ""))
+    _line("aquabus-address", "%d" % s["aquabus_address"])
+    print("  standby allowed")
+    for key in STANDBY_BITS:
+        _line(key, _on(s["standby_" + key]), indent=4, width=22)
+    print("  in standby")
+    for key in IN_STANDBY_BITS:
+        _line(key, _on(s["standby_" + key]), indent=4, width=22)
     unknown = buf[STANDBY] & ~sum(dict(STANDBY_BITS, **IN_STANDBY_BITS).values())
     if unknown:
-        print("  unknown standby bits %#04x" % unknown)
+        _line("unknown standby bits", "%#04x" % unknown)
 
 
 SECTIONS = ["display", "flow", "sensor", "alarm", "rgb", "system"]
@@ -644,11 +647,11 @@ def show(buf, labels, live, sections, serial):
     captures instead of a device."""
     s = decode(buf)
     firmware = live.get("firmware")
-    print("%s %s%s%s"
-          % (TITLE, serial, "   firmware %d" % firmware if firmware else "",
-             "   (live readings from %s)" % live["source"] if live
-             else "   (no live readings: report 0x01 did not arrive and the "
-                  "kernel driver is not loaded)"))
+    print("%s %s" % (TITLE, serial))
+    if firmware:
+        _line("firmware", "%d" % firmware)
+    _line("live readings", live["source"] if live
+          else "none: report 0x01 did not arrive and the kernel driver is not loaded")
     for section in sections:
         print()
         if section == "display":
@@ -1271,11 +1274,15 @@ def build_parser(prefix):
     alarm_force = "go past a safety check (see 'alarm --help')"
 
     # ---------------------------------------------------------------- info
-    p = sub.add_parser("info", help="show configuration and live readings",
+    p = sub.add_parser("info", formatter_class=core.HelpFormatter,
+                       help="show configuration and live readings",
                        description="Print what the high flow NEXT is configured to "
                                    "do, and what it reads right now. The live "
                                    "readings come from the report the device sends "
-                                   "every second, so nothing is sent to it for them.")
+                                   "every second, so nothing is sent to it for them. "
+                                   "For scripts, 'get' prints the same as key=value "
+                                   "lines.",
+                       epilog=rgbpx.INFO_NOTE)
     p.add_argument("section", nargs="?", choices=SECTIONS,
                    help="limit the output to one section (default: all)")
     p.set_defaults(func=cmd_info)

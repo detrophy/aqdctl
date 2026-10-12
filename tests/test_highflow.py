@@ -292,22 +292,25 @@ with tempfile.TemporaryDirectory() as tmp:
         bad.append("another device's hwmon node was used: %r" % missing)
 fake = FakeHighflow(live=None)
 out = run(highflow.cmd_info, fake, argparse.Namespace(section="sensor"))
-if "no live readings" not in out or "no reading" not in out:
+if "live readings      none" not in out or "no reading" not in out:
     bad.append("without report 0x01 or hwmon, info does not say so:\n" + out)
 check("kernel driver fallback, found by serial, and no live readings at all", bad)
 
 # ------------------------------------------------------------ info output
 bad = []
 out = run(highflow.cmd_info, FakeHighflow(), argparse.Namespace(section=None))
-for text in ("high flow NEXT %s   firmware 1017   (live readings from report 0x01)" % SERIAL,
-             "brightness        low, when idle: off",
-             "page change       every 5 s",
-             "pages             2 flow, 3 internal temperature",
-             "rotate off, invert off, auto-invert on, device-keys on, menu-lock off",
-             "chart 1           system voltage, every 5 s",
-             "chart 3           water quality, every 0.5 s",
-             "calibration       no corrections",
-             "volume            1036567 l, 690586965 impulses, 179 d 18:52:19 since",
+for text in ("high flow NEXT %s\n  firmware           1017\n"
+             "  live readings      report 0x01\n" % SERIAL,
+             "  brightness         low\n  idle-brightness    off\n",
+             "  page-change        every 5 s\n",
+             "  pages              2 flow, 3 internal temperature",
+             "  rotate             off\n  invert             off\n  auto-invert        on\n"
+             "  device-keys        on\n  menu-lock          off\n",
+             "  1      system voltage         5 s\n",
+             "  3      water quality          0.5 s\n",
+             "  calibration        no corrections\n",
+             "  volume             1036567 l\n  impulses           690586965\n"
+             "  since reset        179 d 18:52:19\n",
              '"Cold Point"               26.16 C       offset +0.00 C',
              "no sensor     offset -0.80 C",
              "100 % at 12.8 uS/cm, 0 % at 50.0 uS/cm",
@@ -315,21 +318,23 @@ for text in ("high flow NEXT %s   firmware 1017   (live readings from report 0x0
              "flow           off    below 45.0 l/h     now 206.5 l/h",
              "internal       on     above 40.00 C      now 26.16 C",
              "external       off    above 45.00 C      no reading",
-             "signal output     flow-sensor: Generate high flow sensor (53068) signal",
+             "  signal-output      flow-sensor: Generate high flow sensor (53068) signal",
              "channel 1: controllers 1-6, up to 90 LEDs; channel 2: controllers 7-8",
              "3  LED Controller 3   channel 1, LEDs 1-9   effect colour gradient",
-             "USB current limit 500 mA",
-             "standby allowed   when-usb-disconnected on, on-usb-suspend on, without-aquabus off"):
+             "  usb-current        500 mA\n",
+             "  standby allowed\n    when-usb-disconnected  on\n"
+             "    on-usb-suspend         on\n    without-aquabus        off\n",
+             "  switch             off\n"):
     if text not in out:
         bad.append("missing: %r" % text)
 out = run(highflow.cmd_info, FakeHighflow(BY_NUMBER[8]), argparse.Namespace(section="flow"))
-if "calibration       20 l/h: -1.00 %, 30 l/h: +1.00 %, 50 l/h: +1.00 %" not in out:
+if "calibration        20 l/h: -1.00 %, 30 l/h: +1.00 %, 50 l/h: +1.00 %" not in out:
     bad.append("capture 08's calibration is not shown:\n" + out)
 out = run(highflow.cmd_info, FakeHighflow(BY_NUMBER[16]), argparse.Namespace(section="display"))
-if "page change       off" not in out:
+if "page-change        off" not in out:
     bad.append("capture 16's page change is not shown as off")
 out = run(highflow.cmd_info, FakeHighflow(BY_NUMBER[57]), argparse.Namespace(section="system"))
-if "USB current limit 2000 mA, above the USB limit allowed" not in out:
+if "usb-current        2000 mA, above the USB limit allowed" not in out:
     bad.append("capture 57's USB current is not shown:\n" + out)
 out = run(highflow.cmd_info, FakeHighflow(), argparse.Namespace(section="alarm"))
 if "display" in out or "system" in out or "alarm" not in out:

@@ -503,10 +503,11 @@ def describe_rgb(buf, layout, index, name, source_label):
 
 
 def info_rgb(buf, layout, names, source_label):
-    print("RGB  (%s)" % layout.describe())
-    print("  function: %s     global brightness: %.0f%% (%d/255)"
-          % ("on" if buf[layout.enable] == RGB_ENABLE_ON else "off",
-             buf[layout.brightness] * 100.0 / 255, buf[layout.brightness]))
+    print("rgb  (%s)" % layout.describe())
+    print("  %-18s %s" % ("switch", "on" if buf[layout.enable] == RGB_ENABLE_ON else "off"))
+    print("  %-18s %.2f %% (%d/255)" % ("brightness", buf[layout.brightness] * 100.0 / 255,
+                                        buf[layout.brightness]))
+    print()
     used = False
     for i in range(1, layout.count + 1):
         if controller_span(buf, layout, i) is None:
@@ -516,11 +517,14 @@ def info_rgb(buf, layout, names, source_label):
                      source_label)
     if not used:
         print("  no controllers configured")
-    print()
-    print("  The number in front is the controller's: Aquasuite shows it as")
-    print("  \"LED Controller n\", and 'name controller n' uses it too. Add one with")
-    print("  'rgb create CH pos A-B', edit or resize one with 'rgb set controller N',")
-    print("  and remove one with 'rgb remove controller N'.")
+
+
+# What info's RGB section shows, for 'info --help'.
+INFO_NOTE = """\
+rgb: the number in front of a controller is its own: Aquasuite shows it as
+  "LED Controller n", and 'name controller n' uses it too. Add one with
+  'rgb create CH pos A-B', edit or resize one with 'rgb set controller N',
+  and remove one with 'rgb remove controller N'."""
 
 
 # -------------------------------------------------------------------- keys
