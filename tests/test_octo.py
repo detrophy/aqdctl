@@ -1233,6 +1233,22 @@ if bad:
 else:
     print("  ok    layout version: every capture is at 2, and 3 is refused")
 
-total = len(CASES) + 40
+# the three ways of starting the tool, from the repository root and from elsewhere
+import subprocess
+bad = []
+for cwd, argv in ((ROOT, ["aqdctl.py"]), (ROOT, ["-m", "aqdctl"]), (ROOT, ["aqdctl"]),
+                  (tempfile.gettempdir(), [os.path.join(ROOT, "aqdctl")])):
+    r = subprocess.run([sys.executable] + argv + ["--help-udev"], cwd=cwd,
+                       capture_output=True, text=True)
+    if r.returncode != 0 or "udev" not in r.stdout:
+        bad.append("python3 %s (in %s): %s" % (" ".join(argv), cwd,
+                                               (r.stderr.strip().splitlines() or ["no output"])[-1]))
+if bad:
+    failures.append(("starting the tool", "; ".join(bad)))
+    print("  FAIL  starting the tool: %s" % "; ".join(bad))
+else:
+    print("  ok    starting the tool: aqdctl.py, -m aqdctl and the aqdctl directory")
+
+total = len(CASES) + 41
 print("\n%d/%d passed" % (total - len(failures), total))
 sys.exit(1 if failures else 0)
