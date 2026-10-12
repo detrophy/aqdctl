@@ -6,6 +6,7 @@ the USB descriptor, and it is the only identifier that does not move: hidraw
 and hwmon numbers change between boots, and even between two runs."""
 
 import glob
+import json
 import os
 import sys
 
@@ -59,6 +60,19 @@ def hwmon_dir(serial):
         except OSError:
             continue
     return None
+
+
+def print_list(found, as_json=False):
+    """The attached devices for scripts: serial, type and alias, one device per
+    line, or as JSON. Needs no access to the devices."""
+    aliases = {serial: alias for alias, serial in core.aliases().items()}
+    rows = [{"serial": f.serial or None, "type": f.kind.NAME,
+             "alias": aliases.get(f.serial)} for f in found]
+    if as_json:
+        print(json.dumps(rows, indent=2))
+        return
+    for row in rows:
+        print(" ".join(row[k] or "-" for k in ("serial", "type", "alias")))
 
 
 def list_devices(found, out=None):

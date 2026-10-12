@@ -1,9 +1,10 @@
 """The command line.
 
-'aqdctl info' lists the attached devices. Everything else names one device by
-its serial or alias, first - 'aqdctl --device SERIAL ...' - and then uses the
-commands that device offers. The serial chooses which command tree applies, so
-it has to be known before the rest is parsed; that is why it must come first."""
+'aqdctl info' lists the attached devices, 'aqdctl list' does so for scripts.
+Everything else names one device by its serial or alias, first - 'aqdctl
+--device SERIAL ...' - and then uses the commands that device offers. The
+serial chooses which command tree applies, so it has to be known before the
+rest is parsed; that is why it must come first."""
 
 import contextlib
 import os
@@ -20,6 +21,7 @@ def _supported():
 def general_help():
     return """\
 usage: aqdctl info
+       aqdctl list [--json]
        aqdctl --device SERIAL COMMAND ...
        aqdctl --device SERIAL --help
        aqdctl --help-udev
@@ -28,10 +30,11 @@ Read and change the settings stored on Aquacomputer devices, without Aquasuite.
 Supported: {supported}.
 
   aqdctl info                     list the attached devices with their serials
+  aqdctl list                     the same for scripts: serial, type, alias
   aqdctl --device SERIAL --help   the commands that device offers
   aqdctl --device SERIAL info     its settings and live readings
 
---device comes first, and every command other than the device list needs it.
+--device comes first, and every command other than the device lists needs it.
 The serial is the one Aquasuite shows, e.g. 12345-67890. It is the only way of
 telling two devices of the same kind apart that survives a reboot, and a
 command never changes more than one device. 'aqdctl --device SERIAL alias NAME'
@@ -104,6 +107,11 @@ def _main(argv):
         return
     if argv == ["info"]:
         discovery.list_devices(discovery.attached())
+        return
+    if argv[0] == "list":
+        if argv[1:] not in ([], ["--json"]):
+            core.fail(core.EXIT_USAGE, "usage: aqdctl list [--json]")
+        discovery.print_list(discovery.attached(), argv[1:] == ["--json"])
         return
 
     serial, rest = _take_device(argv)

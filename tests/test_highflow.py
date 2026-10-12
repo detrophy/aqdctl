@@ -1466,9 +1466,9 @@ if "6  not confirmed" not in cli.general_help():
     bad.append("the general help does not list the exit statuses")
 check("exit statuses: each outcome its own, -q silent, no terminal never blocks", bad)
 
-# ------------------------------------------------------------ aliases
-# An alias stands in for the serial in --device, and is kept in the config
-# next to the protected channels.
+# ------------------------------------------------- list and aliases
+# 'aqdctl list' is the device list for scripts; an alias stands in for the
+# serial in --device, and is kept in the config next to the protected channels.
 def run_cli(argv):
     """(status, stdout, stderr) of one command line."""
     out, err = io.StringIO(), io.StringIO()
@@ -1495,12 +1495,23 @@ def own_serial(kind, path, serial):
 discovery.attached = lambda: both
 core.Device = own_serial
 try:
+    status, out, err = run_cli(["list"])
+    if (status, out) != (0, "%s octo -\n%s highflow -\n" % (OCTO, HFN)):
+        bad.append("list without aliases: %r %r" % (status, out))
     core.set_protected(HFN, {1})
     status, out, err = run_cli(["--device", HFN, "alias", "loop-a"])
     if status or "loop-a" not in out:
         bad.append("setting an alias: %r %r" % (status, err))
     if core.protected_channels(HFN) != {1}:
         bad.append("setting an alias lost the protected channels")
+    status, out, err = run_cli(["list"])
+    if out != "%s octo -\n%s highflow loop-a\n" % (OCTO, HFN):
+        bad.append("list with an alias: %r" % out)
+    status, out, err = run_cli(["list", "--json"])
+    import json
+    if json.loads(out) != [{"serial": OCTO, "type": "octo", "alias": None},
+                           {"serial": HFN, "type": "highflow", "alias": "loop-a"}]:
+        bad.append("list --json: %r" % out)
     for argv, want in (([HFN], "loop-a\n"), ([OCTO], "-\n")):
         status, out, err = run_cli(["--device"] + argv + ["alias"])
         if (status, out) != (0, want):
@@ -1521,16 +1532,19 @@ try:
     status, out, err = run_cli(["--device", HFN, "alias", "loop-a"])
     if status:
         bad.append("setting a device's own alias again was refused: %r" % err)
-    status, out, err = run_cli(["--device", "loop-b", "info"])
-    if status != core.EXIT_DEVICE or "neither" not in err:
-        bad.append("an unknown alias: %r %r" % (status, err))
+    for argv, status_wanted, text in (
+            (["--device", "loop-b", "info"], core.EXIT_DEVICE, "neither"),
+            (["list", "--keys"], core.EXIT_USAGE, "usage")):
+        status, out, err = run_cli(argv)
+        if status != status_wanted or text not in err:
+            bad.append("%s: %r %r" % (" ".join(argv), status, err))
     core.set_alias("11111-22222", "spare")                 # a device not attached
     status, out, err = run_cli(["--device", "spare", "info"])
     if status != core.EXIT_DEVICE or "11111-22222" not in err:
         bad.append("the alias of a detached device: %r %r" % (status, err))
     status, out, err = run_cli(["--device", HFN, "alias", "-"])
-    status, out, err = run_cli(["--device", HFN, "alias"])
-    if out != "-\n" or core.protected_channels(HFN) != {1}:
+    status, out, err = run_cli(["list"])
+    if out != "%s octo -\n%s highflow -\n" % (OCTO, HFN) or core.protected_channels(HFN) != {1}:
         bad.append("after clearing: %r, protected %r" % (out, core.protected_channels(HFN)))
     if run_cli(["--device", "loop-a", "info"])[0] != core.EXIT_DEVICE:
         bad.append("a cleared alias still selects the device")
@@ -1538,7 +1552,7 @@ finally:
     discovery.attached, core.Device = real_attached, real_device
     core.config_path = real_config
     shutil.rmtree(tmp)
-check("aliases: unique, never serial-shaped, accepted by --device", bad)
+check("list and aliases: one line per device, aliases unique, never serial-shaped", bad)
 
 # Every write above backed up into BACKUPS, never the real data directory.
 core.data_dir = real_data_dir
