@@ -1151,5 +1151,44 @@ else:
         bad.append("'rgb effects' offers 'limits' as a parameter to set")
 check("colour gradient: limits, their colours and the palette match capture 16", bad)
 
+
+# --------------------------------------- the calibrated flow is at 0x53
+# The live report carries the flow twice: 0x51 before the calibration table
+# and 0x53 after it. In capture 10 they part as soon as a correction near the
+# flow becomes non-zero.
+def usb_sequence(path):
+    """('write', settings) and ('live', report) in capture order."""
+    data, off, out = open(path, "rb").read(), 0, []
+    while off < len(data):
+        btype, blen = struct.unpack_from("<II", data, off)
+        if blen < 12:
+            break
+        if btype == 6:
+            caplen = struct.unpack_from("<I", data, off + 20)[0]
+            pkt = data[off + 28: off + 28 + caplen]
+            hlen, xfer = struct.unpack_from("<H", pkt, 0)[0], pkt[22]
+            payload = pkt[hlen:]
+            if xfer == 1 and len(payload) == highflow.INPUT_REPORT_SIZE and payload[0] == 1:
+                out.append(("live", bytes(payload)))
+            elif xfer == 2 and pkt[27] == 0 and pkt[28] == 0x21 \
+                    and len(pkt) - 36 >= highflow.CTRL_REPORT_SIZE:
+                out.append(("write", bytes(pkt[36:36 + highflow.CTRL_REPORT_SIZE])))
+        off += blen
+    return out
+
+
+bad, parted = [], 0
+for kind, buf in usb_sequence(CAP):
+    if kind != "live":
+        continue
+    live = highflow.decode_live(buf)
+    if (live["flow"], live["flow_raw"]) != (core.be16(buf, 0x53) / 10.0, core.be16(buf, 0x51) / 10.0):
+        bad.append("decode_live does not read the calibrated flow at 0x53, the raw one at 0x51")
+        break
+    parted += live["flow"] != live["flow_raw"]
+if parted < 10:
+    bad.append("only %d live reports with the two flows apart" % parted)
+check("live flow: calibrated at 0x53, raw at 0x51, as capture 10 shows", bad)
+
 print("\n%d/%d passed" % (checks - len(failures), checks))
 sys.exit(1 if failures else 0)

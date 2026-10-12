@@ -190,7 +190,14 @@ def parse_sensor(spec):
 # --- report 0x01, live readings. Sent by the device once a second, without a
 # checksum; 0x7fff marks a reading that is not available.
 LIVE_NONE = 0x7FFF
-LIVE_FLOW = 0x51            # u16: dL/h
+# Two flows: before and after the calibration table (CALIBRATION) is applied.
+# They are equal while every correction is 0, which is how they were first
+# logged. In ../usb-captures/10-highflow-flow-calibration they part the moment a
+# correction near the flow becomes non-zero: 0x51 stays at 205.9 l/h while 0x53
+# goes to 207.7. The display and the flow alarm use 0x53; the kernel driver
+# reads 0x51.
+LIVE_FLOW = 0x53            # u16: dL/h, calibrated
+LIVE_FLOW_RAW = 0x51        # u16: dL/h, before calibration
 LIVE_INTERNAL = 0x55        # s16: 0.01 C, offset included
 LIVE_EXTERNAL = 0x57        # s16: 0.01 C, offset included
 LIVE_WATER_QUALITY = 0x59   # u16: 0.01 %
@@ -290,6 +297,7 @@ def decode_live(buf):
         "serial": "%05d-%05d" % (be16(buf, 3), be16(buf, 5)),
         "firmware": core.firmware(buf),
         "flow": u16(LIVE_FLOW, 10.0),
+        "flow_raw": u16(LIVE_FLOW_RAW, 10.0),
         "internal": s16(LIVE_INTERNAL, 100.0),
         "external": external,
         "water_quality": u16(LIVE_WATER_QUALITY, 100.0),

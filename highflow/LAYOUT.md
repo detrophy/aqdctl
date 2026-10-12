@@ -281,8 +281,8 @@ beside each one. 0x7fff marks a reading that is not available.
 |--------|---------|----------------------------------------------------------------------------------------|-----------------------------------------------|
 | 0x03   | 2 x u16 | serial number: each u16 as 5 digits, zero-padded, joined by a dash, e.g. `01234-00567` | matches Aquasuite's device information        |
 | 0x0d   | u16     | firmware version (1017)                                                                | matches Aquasuite's device information        |
-| 0x51   | u16     | flow, dL/h                                                                             | = hwmon `fan1` in all 11 reports              |
-| 0x53   | u16     | flow, second copy                                                                      | equal to 0x51 in every report                 |
+| 0x51   | u16     | flow before calibration, dL/h                                                          | = hwmon `fan1` in all 11 reports              |
+| 0x53   | u16     | flow after calibration, dL/h; what the display and the flow alarm use                  | `../usb-captures/10`, see below               |
 | 0x55   | s16     | internal temperature, 0.01 C                                                           | = hwmon `temp1`                               |
 | 0x57   | s16     | external temperature, 0.01 C; 0x7fff = no sensor                                       | hwmon `temp2` reports no data                 |
 | 0x59   | u16     | water quality, 0.01 %                                                                  | = hwmon `fan2`                                |
@@ -294,9 +294,11 @@ beside each one. 0x7fff marks a reading that is not available.
 | 0x69   | u32     | impulse count                                                                          | owner's Aquasuite reading; +38.2/s at 206 l/h |
 | 0x6d   | u32     | time since the volume counter was last reset, s                                        | owner's Aquasuite reading; +1/s               |
 
-- 0x53: an identical copy of the flow at 0x51. It may be the reading before
-  the calibration correction. The corrections were all 0 during this capture,
-  so the two could not differ.
+- 0x51 and 0x53 are equal while every calibration correction is 0, as in
+  this log. In `../usb-captures/10-highflow-flow-calibration` they part as
+  soon as a correction near the flow is set: 0x53 follows the calibration
+  table and 0x51 does not. The kernel driver reads 0x51, so its `fan1` is
+  the uncalibrated flow.
 - 0x65/0x69: about 666 impulses per litre.
 - 0x94-0x9b repeat the internal temperature, external temperature, +5 V and
   USB +5 V in the same encoding. Both temperature copies include the offset:
