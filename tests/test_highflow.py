@@ -881,10 +881,6 @@ for form in forms + malformed:
 check("command forms: %d parse, %d malformed ones refused" % (len(forms), len(malformed)),
       bad)
 
-core.data_dir = real_data_dir
-shutil.rmtree(BACKUPS)
-
-
 # ------------------------------ Aquasuite's own calibration edits (USB capture)
 # 10-highflow-flow-calibration.pcapng holds 18 settings writes, one per field
 # Aquasuite changed: seven of the ten flow rates and all ten corrections. Each
@@ -1469,6 +1465,10 @@ finally:
 if "6  not confirmed" not in cli.general_help():
     bad.append("the general help does not list the exit statuses")
 check("exit statuses: each outcome its own, -q silent, no terminal never blocks", bad)
+
+# Every write above backed up into BACKUPS, never the real data directory.
+core.data_dir = real_data_dir
+shutil.rmtree(BACKUPS)
 
 print("\n%d/%d passed" % (checks - len(failures), checks))
 sys.exit(1 if failures else 0)
