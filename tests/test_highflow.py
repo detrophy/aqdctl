@@ -1942,6 +1942,15 @@ with core.device_lock(HFN, wait=0.2):
     pass                                    # released again
 check("device lock: a second writer waits, then gives up with status 3", bad)
 
+# ------------------------------------------------------------- backups
+# two backups of one report within a second are two files
+bad = []
+first = core.backup(capture("01-baseline"), FakeHighflow())
+second = core.backup(capture(BY_NUMBER[8]), FakeHighflow())
+if first == second or open(first, "rb").read() != bytes(capture("01-baseline")):
+    bad.append("%s, %s" % (first, second))
+check("backups: a second backup in the same second does not overwrite the first", bad)
+
 # Every write above backed up into BACKUPS, never the real data directory.
 core.data_dir = real_data_dir
 shutil.rmtree(BACKUPS)

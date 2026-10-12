@@ -548,14 +548,26 @@ def backup(buf, dev, explicit=None, rid=None):
     device a backup came from, and restore relies on it."""
     if explicit:
         path = explicit
+        fh = _open_nofollow(path, "wb")
     else:
         directory = data_dir()
         _make_dir(directory)
         stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         tag = "%02x" % (rid if rid is not None else buf[0])
-        path = os.path.join(directory, "%s-%s-%s-%s.bin"
-                            % (dev.kind.NAME, dev.serial, tag, stamp))
-    with _open_nofollow(path, "wb") as fh:
+        stem = os.path.join(directory, "%s-%s-%s-%s" % (dev.kind.NAME, dev.serial, tag, stamp))
+        # Two backups within one second get -2, -3, ...: an earlier backup is
+        # never overwritten.
+        n = 1
+        while True:
+            path = stem + (".bin" if n == 1 else "-%d.bin" % n)
+            try:
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                             0o644)
+                break
+            except FileExistsError:
+                n += 1
+        fh = os.fdopen(fd, "wb")
+    with fh:
         fh.write(bytes(buf))
     _give_back(path)
     return path
