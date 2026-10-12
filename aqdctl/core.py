@@ -643,68 +643,150 @@ def store(dev, after, save=True):
              % "\n".join(diff_lines(after, verify)))
 
 
+def profile_path(prefix, dev, rid):
+    """PREFIX-SERIAL-RR.bin: what 'backup -o PREFIX' writes, named so that
+    'restore' knows which device and report it holds."""
+    if prefix.endswith(".bin"):
+        prefix = prefix[:-len(".bin")]
+    return "%s-%s-%02x.bin" % (prefix, dev.serial, rid)
+
+
 def cmd_backup(dev, args):
     for rid in (CTRL_REPORT_ID, LABEL_REPORT_ID):
         # A report of an unknown layout is still worth saving: it is what a new
         # firmware's layout gets mapped from.
         buf = dev.read(rid, check=False)
-        target = args.output
-        if target and rid != CTRL_REPORT_ID:
-            root, ext = os.path.splitext(target)
-            target = "%s-%02x%s" % (root, rid, ext)
+        target = profile_path(args.output, dev, rid) if args.output else None
         path = backup(buf, dev, target, rid)
         print("report %#04x: wrote %d bytes to %s" % (rid, len(buf), path))
 
 
-def cmd_restore(dev, args):
+def _load_dump(dev, path):
+    """A saved report, checked to be one of this device's: id, size, checksum
+    and, for settings, the layout version."""
     try:
-        with open(args.file, "rb") as fh:
+        with open(path, "rb") as fh:
             saved = bytearray(fh.read())
     except OSError as exc:
-        sys.exit("Cannot read %s: %s." % (args.file, exc.strerror or exc))
+        sys.exit("Cannot read %s: %s." % (path, exc.strerror or exc))
     rid = saved[0] if saved else None
     sizes = dev.kind.REPORT_SIZES
     if rid not in sizes or len(saved) != sizes[rid]:
         sys.exit("%s is not a report of the %s: it has id %r and %d bytes, and the\n"
                  "%s's reports are %s."
-                 % (args.file, dev.kind.TITLE, rid, len(saved), dev.kind.TITLE,
+                 % (path, dev.kind.TITLE, rid, len(saved), dev.kind.TITLE,
                     ", ".join("%#04x with %d bytes" % kv for kv in sorted(sizes.items()))))
     stored, computed = report_crc(saved)
     if stored != computed:
-        sys.exit("%s has a bad checksum - refusing to restore it." % args.file)
+        sys.exit("%s has a bad checksum - refusing to restore it." % path)
     if rid == CTRL_REPORT_ID and layout_version(saved) != dev.kind.STRUCTURE_ID:
         sys.exit("%s holds settings of layout version %d; the %s uses version %d.\n"
                  "Its fields would land in the wrong places, so it is not restored."
-                 % (args.file, layout_version(saved), dev.kind.TITLE, dev.kind.STRUCTURE_ID))
-    force = getattr(args, "force", False)
-    # Settings reports carry no serial, so the file name is the only record of
-    # where a backup came from. Restoring another device's settings would copy
-    # its whole configuration - pumps included - onto this one.
-    origin = SERIAL_PATTERN.search(os.path.basename(args.file))
-    if not force and origin is None:
+                 % (path, layout_version(saved), dev.kind.TITLE, dev.kind.STRUCTURE_ID))
+    return saved
+
+
+def _check_origin(dev, path, other_device):
+    """Settings reports carry no serial, so the file name is the only record of
+    where a dump came from. Restoring another device's settings copies its
+    whole configuration - pumps included - onto this one."""
+    origin = SERIAL_PATTERN.search(os.path.basename(path))
+    if other_device or origin is not None and origin.group(0) == dev.serial:
+        return
+    if origin is None:
         fail(EXIT_REFUSED, "%s does not say which device it came from: its name holds no\n"
-                 "serial, and the report itself carries none. Re-run with --force if\n"
-                 "it was taken from this %s (%s)."
-                 % (args.file, dev.kind.TITLE, dev.serial))
-    if not force and origin.group(0) != dev.serial:
-        fail(EXIT_REFUSED, "%s was taken from device %s, not from %s. Restoring it would\n"
-                 "copy that device's settings onto this one. Re-run with --force if\n"
-                 "that is what you want." % (args.file, origin.group(0), dev.serial))
-    # A restore rewrites the whole report, so it reaches protected channels too.
-    # There is no per-channel version of this, hence the blanket refusal.
-    guarded = protected_channels(dev.serial)
-    if guarded and rid == CTRL_REPORT_ID and not force:
-        fail(EXIT_REFUSED, "Restoring rewrites every channel, including protected channel%s "
-                 "%s.\nRe-run with --force if that is what you want."
-                 % ("" if len(guarded) == 1 else "s",
-                    ", ".join(str(c) for c in sorted(guarded))))
-    before = dev.read(rid)
-    # The device's own safety checks apply to a restore as to any other write:
-    # a backup can hold a USB current or signal output mode just as a command can.
-    guard = getattr(dev.kind, "guard_write", None)
-    if guard is not None and rid == CTRL_REPORT_ID and before != saved:
-        guard(dev, before, saved, args)
-    commit(dev, before, saved, args)
+             "serial, and the report itself carries none. Re-run with --other-device\n"
+             "to restore it onto this %s (%s)." % (path, dev.kind.TITLE, dev.serial))
+    fail(EXIT_REFUSED, "%s was taken from device %s, not from %s. Restoring it would\n"
+         "copy that device's settings onto this one. Re-run with --other-device if\n"
+         "that is what you want." % (path, origin.group(0), dev.serial))
+
+
+def protected_changes(dev, before, after):
+    """The protected fan channels whose bytes differ between two settings
+    reports."""
+    spans = getattr(dev.kind, "channel_spans", None)
+    if spans is None:
+        return []
+    return [ch for ch in sorted(protected_channels(dev.serial))
+            if any(before[a:b] != after[a:b] for a, b in spans(ch))]
+
+
+def cmd_restore(dev, args):
+    if len(args.files) > 2:
+        fail(EXIT_USAGE, "restore takes a settings dump, a names dump, or one of each.")
+    dumps = {}
+    for path in args.files:
+        saved = _load_dump(dev, path)
+        if saved[0] in dumps:
+            fail(EXIT_USAGE, "%s and %s are both report %#04x."
+                 % (dumps[saved[0]][0], path, saved[0]))
+        _check_origin(dev, path, getattr(args, "other_device", False))
+        dumps[saved[0]] = (path, saved)
+    force = getattr(args, "force", False)
+    pairs = []
+    for rid in sorted(dumps):
+        path, saved = dumps[rid]
+        before = dev.read(rid)
+        if before == saved:
+            continue
+        if rid == CTRL_REPORT_ID:
+            touched = protected_changes(dev, before, saved)
+            if touched and not force:
+                fail(EXIT_REFUSED, "%s changes protected channel%s %s. Re-run with --force\n"
+                     "if that is what you want."
+                     % (path, "" if len(touched) == 1 else "s",
+                        ", ".join(str(c) for c in touched)))
+            # The device's own safety checks apply to a restore as to any other
+            # write: a dump can hold a USB current or a signal output mode just
+            # as a command can.
+            guard = getattr(dev.kind, "guard_write", None)
+            if guard is not None:
+                guard(dev, before, saved, args)
+        pairs.append((before, saved))
+    if not pairs:
+        print("Nothing to change.")
+        return
+    commit_many(dev, pairs, args)
+
+
+class replaced:
+    """A command's flags with some of them replaced."""
+
+    def __init__(self, args, **replace):
+        self.__dict__.update(vars(args))
+        self.__dict__.update(replace)
+
+
+def backup_target(path, rid):
+    """Where --backup FILE puts report `rid`: FILE for the settings, FILE-RR
+    for another report, so two reports never share one file."""
+    if not path or rid == CTRL_REPORT_ID:
+        return path
+    stem, dot, ext = path.rpartition(".")
+    return "%s-%02x.%s" % (stem, rid, ext) if dot else "%s-%02x" % (path, rid)
+
+
+def commit_many(dev, pairs, args):
+    """Write several reports, [(before, after)], after one confirmation; each
+    gets its own backup, write and read-back."""
+    if len(pairs) == 1:
+        before, after = pairs[0]
+        commit(dev, before, after, args)
+        return
+    if args.dry_run:
+        for before, after in pairs:
+            show_diff(before, after)
+        print("--dry-run: nothing written.")
+        return
+    if not args.yes:
+        notice = ("These writes go into the %s's persistent memory - they survive a\n"
+                  "reboot and will show up in Aquasuite." % dev.kind.TITLE)
+        if not confirm("Proceed?", notice):
+            fail(EXIT_NOT_CONFIRMED, "Aborted.")
+    for before, after in pairs:
+        commit(dev, before, after, replaced(args, yes=True, dry_run=False,
+                                            backup=backup_target(args.backup, after[0])))
 
 
 # ---------------------------------------------------------------- parsing
@@ -785,23 +867,40 @@ def add_alias(sub, prefix):
     p.set_defaults(func=cmd_alias, needs_device=False)
 
 
-def add_backup_restore(sub, kind):
-    p = sub.add_parser("backup", help="save the raw reports to a file",
-                       description="Write both feature reports to disk, byte for "
-                                   "byte, so 'restore' can put them back. Without "
-                                   "-o the file names carry the device's serial.")
-    p.add_argument("-o", "--output", metavar="FILE", help="output file")
+def add_backup_restore(sub, kind, prefix):
+    p = sub.add_parser(
+        "backup", formatter_class=HelpFormatter, help="save the raw reports to files",
+        description="Write both feature reports to disk, byte for byte, so 'restore' "
+                    "can put them back. Without -o they go to the data directory, "
+                    "named after the device's type and serial and the time. With -o "
+                    "PREFIX they go to PREFIX-SERIAL-03.bin (settings) and "
+                    "PREFIX-SERIAL-08.bin (names), replacing earlier ones: a profile.",
+        epilog="examples:\n"
+               "  {p} backup -o gaming\n"
+               "  {p} restore gaming-SERIAL-03.bin gaming-SERIAL-08.bin -y"
+               .format(p=prefix))
+    p.add_argument("-o", "--output", metavar="PREFIX",
+                   help="file name prefix; the serial and report number are appended")
     p.set_defaults(func=cmd_backup)
 
     p = add_write_flags(sub.add_parser(
-        "restore", help="write a saved report back to the device",
-        description="Restore a file written by 'backup'. The checksum is checked "
-                    "before anything is sent. A backup whose name holds another "
-                    "device's serial, or none, needs --force: restoring it would "
-                    "copy that device's settings onto this one.%s"
-                    % (" It rewrites every channel, so it is also refused while "
-                       "any channel is protected." if getattr(kind, "HAS_FANS", False)
-                       else " The safety checks of the commands apply to it too.")),
-        guarded=True, force="restore even though one of the checks above refuses it")
-    p.add_argument("file", metavar="FILE")
+        "restore", formatter_class=HelpFormatter,
+        help="write saved reports back to the device",
+        description="Restore files written by 'backup': a settings dump (03), a names "
+                    "dump (08), or one of each, written after one confirmation. "
+                    "Checksums and the layout version are checked before anything is "
+                    "sent. A dump whose name holds another device's serial, or none, "
+                    "needs --other-device: it copies that device's settings onto this "
+                    "one. The safety checks of the commands apply to a restore too%s; "
+                    "--force goes past them."
+                    % (", and so does channel protection: a dump that changes a "
+                       "protected channel is refused" if getattr(kind, "HAS_FANS", False)
+                       else "")),
+        force="go past a safety check%s" % (", or change a protected channel"
+                                            if getattr(kind, "HAS_FANS", False) else ""))
+    p.add_argument("files", metavar="FILE", nargs="+",
+                   help="a settings dump, a names dump, or one of each")
+    p.add_argument("--other-device", action="store_true", dest="other_device",
+                   help="restore a dump taken from another device, or one whose name "
+                        "holds no serial")
     p.set_defaults(func=cmd_restore)

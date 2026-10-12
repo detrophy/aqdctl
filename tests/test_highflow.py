@@ -359,6 +359,8 @@ with tempfile.TemporaryDirectory() as tmp:
     core.data_dir = lambda: tmp
     try:
         run(core.cmd_backup, FakeHighflow(), argparse.Namespace(output=None))
+        with open(os.path.join(tmp, "x-%s-03.bin" % SERIAL), "w") as fh:
+            fh.write("an older profile, replaced")
         run(core.cmd_backup, FakeHighflow(), argparse.Namespace(output=os.path.join(tmp, "x.bin")))
     finally:
         core.data_dir = real
@@ -367,7 +369,7 @@ with tempfile.TemporaryDirectory() as tmp:
         hit = [f for f in files if f.startswith("highflow-%s-%02x-" % (SERIAL, rid))]
         if len(hit) != 1 or os.path.getsize(os.path.join(tmp, hit[0])) != size:
             bad.append("default backup of report %#04x: %r" % (rid, files))
-    for name, size in (("x.bin", 682), ("x-08.bin", 773)):
+    for name, size in (("x-%s-03.bin" % SERIAL, 682), ("x-%s-08.bin" % SERIAL, 773)):
         if name not in files or os.path.getsize(os.path.join(tmp, name)) != size:
             bad.append("-o backup %s missing or wrong size: %r" % (name, files))
 # An Octo report is not a high flow NEXT report.
@@ -379,15 +381,17 @@ with tempfile.TemporaryDirectory() as tmp:
     fake = FakeHighflow()
     try:
         with contextlib.redirect_stdout(io.StringIO()):
-            core.cmd_restore(fake, argparse.Namespace(file=path, force=True, dry_run=True,
-                                                      verbose=False, yes=True, backup=None))
+            core.cmd_restore(fake, argparse.Namespace(files=[path], force=True, dry_run=True,
+                                                      other_device=True, verbose=False,
+                                                      yes=True, backup=None))
         bad.append("an Octo report was accepted for the high flow NEXT")
     except SystemExit as exc:
         if "is not a report of the high flow NEXT" not in str(exc):
             bad.append("wrong refusal: %s" % exc)
     if fake.written:
         bad.append("something was written")
-check("backup names carry type and serial; an Octo report is refused", bad)
+check("backup names carry type and serial, -o PREFIX the serial and report; an Octo "
+      "report is refused", bad)
 
 # ------------------------------------------------------ the command line
 bad = []
@@ -760,7 +764,32 @@ with tempfile.TemporaryDirectory() as tmp:
     out, err, code = do(FakeHighflow(), "restore %s" % os.path.join(tmp, "missing.bin"))
     if not code or not code.startswith("Cannot read"):
         bad.append("a missing file: %r" % code)
-check("restore: runs the same safety checks as the commands", bad)
+    # a profile: both reports, written after one confirmation
+    fake = FakeHighflow(BY_NUMBER[9])
+    out, err, code = do(fake, "backup -o %s" % os.path.join(tmp, "profile"))
+    settings, labels = (os.path.join(tmp, "profile-%s-%02x.bin" % (SERIAL, rid)) for rid in (3, 8))
+    fake = FakeHighflow()
+    fake.blobs[core.LABEL_REPORT_ID][5] ^= 0x01         # a name that differs
+    core.reseal(fake.blobs[core.LABEL_REPORT_ID])
+    out, err, code = do(fake, "restore %s %s -y" % (labels, settings))
+    if code is not None or sorted(b[0] for b in fake.written) != [3, 8] or \
+            bytes(fake.blobs[3]) != bytes(capture(BY_NUMBER[9])):
+        bad.append("both reports: %r, wrote %r" % (code, [b[0] for b in fake.written]))
+    fake = FakeHighflow()
+    fake.blobs[core.LABEL_REPORT_ID][5] ^= 0x01
+    core.reseal(fake.blobs[core.LABEL_REPORT_ID])
+    out, err, code = do(fake, "restore %s %s" % (settings, labels))
+    if code is not None or out.count("Proceed?") != 1 or len(fake.written) != 2:
+        bad.append("both reports, confirmed: asked %d times, %d writes"
+                   % (out.count("Proceed?"), len(fake.written)))
+    for line, words in (("restore %s %s" % (settings, settings), "are both report 0x03"),
+                        ("restore %s %s %s" % (settings, labels, settings), "one of each")):
+        fake = FakeHighflow()
+        out, err, code = do(fake, line)
+        if code is None or code.status != core.EXIT_USAGE or words not in code or fake.written:
+            bad.append("%s: %r" % (line, code))
+check("restore: the safety checks of the commands; a settings and a names dump in one go",
+      bad)
 
 # ---------------------------------------------------------------------- rgb
 bad = []
@@ -1336,8 +1365,8 @@ for line in ("info", "display brightness high", "flow calibration"):
 with tempfile.TemporaryDirectory() as tmp:
     fake = FakeHighflow()
     fake.blobs[core.CTRL_REPORT_ID] = other_layout()
-    out, err, code = do(fake, "backup -o %s" % os.path.join(tmp, "new-layout.bin"))
-    saved = os.path.join(tmp, "new-layout.bin")
+    out, err, code = do(fake, "backup -o %s" % os.path.join(tmp, "new-layout"))
+    saved = os.path.join(tmp, "new-layout-%s-03.bin" % SERIAL)
     if code is not None or not os.path.exists(saved) or open(saved, "rb").read() != bytes(other_layout()):
         bad.append("backup did not save a report of another layout: %s" % code)
     theirs = os.path.join(tmp, "highflow-%s-03-other.bin" % SERIAL)

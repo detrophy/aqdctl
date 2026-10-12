@@ -1528,6 +1528,6 @@ def build_parser(prefix):
     keys.register(sub, prefix)
     batch.register(sub, prefix)
     serve.register(sub, prefix)
-    core.add_backup_restore(sub, sys.modules[__name__])
+    core.add_backup_restore(sub, sys.modules[__name__], prefix)
     core.add_alias(sub, prefix)
     return ap

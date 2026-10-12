@@ -420,38 +420,22 @@ def _unknown(kind, dev, staged, current, line):
 
 def write(dev, plan, args, writer=None):
     """Write each changed report once, after one confirmation, then the
-    protected channels. `writer(before, after)` replaces the usual backup,
-    write, save and read-back for each report."""
-    if not args.yes:
-        notice = ("These writes go into the %s's persistent memory - they survive a\n"
-                  "reboot and will show up in Aquasuite." % dev.kind.TITLE)
-        if not core.confirm("Proceed?", notice):
-            core.fail(core.EXIT_NOT_CONFIRMED, "Aborted.")
+    protected channels. `writer(before, after)` replaces the usual
+    confirmation, backup, write, save and read-back for each report."""
     staged = plan.staged
-    for rid in staged.changed():
-        if writer:
-            writer(bytearray(staged.original[rid]), staged.reports[rid])
-            continue
-        target = args.backup
-        if target and rid != core.CTRL_REPORT_ID:
-            stem, dot, ext = target.rpartition(".")
-            target = "%s-%02x.%s" % (stem, rid, ext) if dot else "%s-%02x" % (target, rid)
-        once = _Args(args, yes=True, dry_run=False, backup=target)
-        core.commit(dev, bytearray(staged.original[rid]), staged.reports[rid], once)
+    pairs = [(bytearray(staged.original[rid]), staged.reports[rid])
+             for rid in staged.changed()]
+    if writer:
+        for before, after in pairs:
+            writer(before, after)
+    elif pairs:
+        core.commit_many(dev, pairs, args)
     if plan.protect:
         stored = core.protected_channels(dev.serial)
         for name, on in plan.protect.items():
             channel = int(name.split(".")[1])
             stored = stored | {channel} if on else stored - {channel}
         core.set_protected(dev.serial, stored)
-
-
-class _Args:
-    """The batch's own flags, with a few replaced."""
-
-    def __init__(self, args, **replace):
-        self.__dict__.update(vars(args))
-        self.__dict__.update(replace)
 
 
 def _read(args):

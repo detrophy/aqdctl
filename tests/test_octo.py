@@ -225,13 +225,13 @@ for name, fn, args, expect in CASES:
 with tempfile.TemporaryDirectory() as tmp:
     try:
         with contextlib.redirect_stdout(io.StringIO()):
-            m.cmd_backup(FakeOcto(), ns(output=os.path.join(tmp, "octo-%s.bin" % SERIAL)))
+            m.cmd_backup(FakeOcto(), ns(output=os.path.join(tmp, "profile")))
         produced = sorted(os.listdir(tmp))
         assert len(produced) == 2, "backup should write both reports, got %s" % produced
         print("  ok    backup -> %s" % produced)
         for f in produced:
             with contextlib.redirect_stdout(io.StringIO()):
-                m.cmd_restore(FakeOcto(), ns(file=os.path.join(tmp, f)))
+                m.cmd_restore(FakeOcto(), ns(files=[os.path.join(tmp, f)], other_device=False))
             print("  ok    restore %s" % f)
     except Exception:
         failures.append(("backup/restore", traceback.format_exc()))
@@ -1071,14 +1071,15 @@ if bad:
 else:
     print("  ok    rgb controllers: own-channel slots, full/overlap refusals, resize, removal")
 
-# restore only accepts a backup of this device, unless --force says otherwise
+# restore only accepts a backup of this device, unless --other-device says
+# otherwise; --force is for the safety checks, not for this
 bad = []
 with tempfile.TemporaryDirectory() as tmp:
-    def _restore(path, force=False):
+    def _restore(path, force=False, other=False):
         """None if it restored, else the refusal - or the crash, which fails."""
         try:
             with contextlib.redirect_stdout(io.StringIO()):
-                m.cmd_restore(FakeOcto(), ns(file=path, force=force))
+                m.cmd_restore(FakeOcto(), ns(files=[path], force=force, other_device=other))
             return None
         except SystemExit as e:
             return str(e) or "exit"
@@ -1098,16 +1099,57 @@ with tempfile.TemporaryDirectory() as tmp:
         bad.append("another device's backup was not refused")
     if not _restore(anonymous) or "does not say which device" not in _restore(anonymous):
         bad.append("a backup without a serial was not refused")
-    if _restore(theirs, force=True):
-        bad.append("--force did not let another device's backup through")
-    if not _restore(other_kind, force=True) or "not a report of the Octo" \
-            not in _restore(other_kind, force=True):
+    if _restore(theirs, other=True) or _restore(anonymous, other=True):
+        bad.append("--other-device did not let another device's backup through")
+    if not _restore(theirs, force=True):
+        bad.append("--force let another device's backup through")
+    if not _restore(other_kind, other=True) or "not a report of the Octo" \
+            not in _restore(other_kind, other=True):
         bad.append("a high flow NEXT report was accepted by the Octo, even with --force")
 if bad:
     failures.append(("restore origin", "; ".join(bad)))
     print("  FAIL  restore origin: %s" % "; ".join(bad))
 else:
-    print("  ok    restore: own backups pass; other or unknown origin needs --force; wrong type never")
+    print("  ok    restore: own backups pass; other or unknown origin needs --other-device; "
+          "wrong type never")
+
+# a protected channel blocks a restore only where the dump would change it
+bad = []
+with tempfile.TemporaryDirectory() as tmp:
+    real_config = core.config_path
+    core.config_path = lambda: os.path.join(tmp, "config.json")
+    try:
+        core.set_protected(SERIAL, {1})
+        before = bytearray(BLOBS[m.CTRL_REPORT_ID])
+        for name, change, refused in (("channel 3", 3, False), ("channel 1", 1, True)):
+            dump = bytearray(before)
+            block = m.channel_base(change) + m.OFF_SETPOINT
+            dump[block] ^= 0x01
+            core.reseal(dump)
+            path = os.path.join(tmp, "octo-%s-03-%d.bin" % (SERIAL, change))
+            open(path, "wb").write(dump)
+            for force in (False, True):
+                fake = FakeOcto()
+                try:
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        m.cmd_restore(fake, ns(files=[path], force=force, other_device=False,
+                                               dry_run=False, backup=os.path.join(tmp, "b.bin")))
+                    outcome_ = None
+                except SystemExit as exc:
+                    outcome_ = exc
+                if refused and not force:
+                    if outcome_ is None or outcome_.code != core.EXIT_REFUSED or fake.written \
+                            or "protected channel 1" not in str(outcome_):
+                        bad.append("%s without --force: %r" % (name, outcome_))
+                elif outcome_ is not None or len(fake.written) != 1:
+                    bad.append("%s%s: %r" % (name, " with --force" if force else "", outcome_))
+    finally:
+        core.config_path = real_config
+if bad:
+    failures.append(("restore protection", "; ".join(bad)))
+    print("  FAIL  restore protection: %s" % "; ".join(bad))
+else:
+    print("  ok    restore: a protected channel blocks it only where the dump changes it")
 
 # protection belongs to one device's serial, never to a channel number alone
 bad = []
@@ -1574,6 +1616,6 @@ with tempfile.TemporaryDirectory() as tmp:
 outcome("batch: every fixture copies onto one with the same controllers, and onto itself "
         "changes nothing", bad[:4])
 
-total = len(CASES) + 49
+total = len(CASES) + 50
 print("\n%d/%d passed" % (total - len(failures), total))
 sys.exit(1 if failures else 0)

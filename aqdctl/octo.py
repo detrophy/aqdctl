@@ -192,6 +192,19 @@ def record_base(ch):
     return CTRL_TABLE + CTRL_STRIDE * (ch - 1)
 
 
+# Each channel's block runs from its mode byte to the next channel's; the
+# last one ends two bytes before the RGB brightness.
+FAN_BLOCK = FAN_CTRL[1] - FAN_CTRL[0]
+
+
+def channel_spans(ch):
+    """The bytes of one fan channel: its block, mode byte first, and its
+    record in the table at CTRL_TABLE. What protection guards in a restore."""
+    block = channel_base(ch) + OFF_MODE
+    record = record_base(ch)
+    return [(block, block + FAN_BLOCK), (record, record + CTRL_STRIDE)]
+
+
 def decode(buf):
     out = {"flow_pulses": be16(buf, FLOW_PULSES),
            "temp_offsets": [sbe16(buf, TEMP_OFFSETS + 2 * i) / 100.0 for i in range(4)],
@@ -1039,6 +1052,6 @@ def build_parser(prefix):
     keys.register(sub, prefix)
     batch.register(sub, prefix)
     serve.register(sub, prefix)
-    core.add_backup_restore(sub, sys.modules[__name__])
+    core.add_backup_restore(sub, sys.modules[__name__], prefix)
     core.add_alias(sub, prefix)
     return ap
