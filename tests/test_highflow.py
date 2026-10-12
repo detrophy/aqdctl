@@ -1440,7 +1440,7 @@ try:
 finally:
     sys.stdin = real_stdin
 
-# through cli.main: usage, an unknown serial
+# through cli.main: usage, an unknown serial, --quiet
 discovery.attached = lambda: both
 core.Device = fake_device
 try:
@@ -1448,9 +1448,9 @@ try:
                          (["--device"], core.EXIT_USAGE),
                          (["info", "--device", HFN], core.EXIT_USAGE),
                          (["--device", "99999-99999", "info"], core.EXIT_DEVICE),
-                         (["--device", HFN, "system", "usb-current", "600", "-y"],
+                         (["--device", HFN, "system", "usb-current", "600", "-y", "-q"],
                           core.EXIT_REFUSED),
-                         (["--device", HFN, "display", "brightness", "high", "-y"], 0)):
+                         (["--device", HFN, "display", "brightness", "high", "-y", "-q"], 0)):
         out, err = io.StringIO(), io.StringIO()
         try:
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
@@ -1460,11 +1460,15 @@ try:
             got = exc.code
         if got != status:
             bad.append("%s: status %r, expected %d" % (" ".join(argv), got, status))
+        if "-q" in argv and out.getvalue():
+            bad.append("%s printed on stdout: %r" % (" ".join(argv), out.getvalue()))
+        if "-q" in argv and status and "Nothing written" not in err.getvalue():
+            bad.append("%s: the refusal is missing from stderr" % " ".join(argv))
 finally:
     discovery.attached, core.Device = real_attached, real_device
 if "6  not confirmed" not in cli.general_help():
     bad.append("the general help does not list the exit statuses")
-check("exit statuses: each outcome its own, no terminal never blocks", bad)
+check("exit statuses: each outcome its own, -q silent, no terminal never blocks", bad)
 
 print("\n%d/%d passed" % (checks - len(failures), checks))
 sys.exit(1 if failures else 0)

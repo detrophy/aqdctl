@@ -108,8 +108,8 @@ def fail(status, message):
 
 
 def confirm(question, notice=None, hint="Add -y to write without asking."):
-    """Ask on the terminal; True for yes. The question goes to stderr, so
-    stdout carries only results. Without a terminal there is nobody to ask, so the
+    """Ask on the terminal; True for yes. The question goes to stderr, so it
+    shows with --quiet. Without a terminal there is nobody to ask, so the
     command ends unconfirmed instead of waiting or failing on end of input."""
     if sys.stdin is None or not sys.stdin.isatty():
         fail(EXIT_NOT_CONFIRMED, "Nothing written: no terminal to confirm on. " + hint)
@@ -603,6 +603,9 @@ def add_write_flags(p, guarded=False, force=None):
                    help="also show the byte-level diff")
     p.add_argument("-y", "--yes", action="store_true",
                    help="skip the confirmation prompt")
+    p.add_argument("-q", "--quiet", action="store_true",
+                   help="print nothing on success; errors and the confirmation "
+                        "still go to stderr")
     p.add_argument("--backup", metavar="FILE",
                    help="where to put the pre-write backup")
     if guarded or force:

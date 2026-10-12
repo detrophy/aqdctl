@@ -1101,6 +1101,7 @@ write flags  (every command that changes something accepts these)
                   Implies --verbose.
   -v, --verbose   also print the byte-level diff of the report
   -y, --yes       skip the confirmation prompt (not for 'volume reset')
+  -q, --quiet     print nothing on success; errors go to stderr
   --backup FILE   where to put the automatic pre-write backup
   --force         go past a safety check below; the refusal says which
 

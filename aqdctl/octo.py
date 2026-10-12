@@ -720,6 +720,7 @@ write flags  (every command that changes something accepts these)
                   Implies --verbose.
   -v, --verbose   also print the byte-level diff of the report
   -y, --yes       skip the confirmation prompt
+  -q, --quiet     print nothing on success; errors go to stderr
   --force         write even to a channel marked with 'protect on'
   --backup FILE   where to put the automatic pre-write backup
 

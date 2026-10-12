@@ -5,6 +5,8 @@ its serial, first - 'aqdctl --device SERIAL ...' - and then uses the commands
 that device offers. The serial chooses which command tree applies, so it has to
 be known before the rest is parsed; that is why it must come first."""
 
+import contextlib
+import os
 import sys
 
 from . import core, discovery
@@ -135,8 +137,11 @@ def _main(argv):
                            getattr(args, "force", False))
 
     dev = core.Device(found.kind, found.path, serial)
-    if getattr(args, "needs_device", True) is False:
-        args.func(dev, args)
-        return
-    with dev:
+    # --quiet: nothing on stdout. Errors and the confirmation go to stderr.
+    with contextlib.ExitStack() as stack:
+        if getattr(args, "quiet", False):
+            stack.enter_context(contextlib.redirect_stdout(
+                stack.enter_context(open(os.devnull, "w"))))
+        if getattr(args, "needs_device", True) is not False:
+            stack.enter_context(dev)
         args.func(dev, args)
