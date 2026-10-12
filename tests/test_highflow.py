@@ -1740,6 +1740,20 @@ for byte in range(256):
         bad.append("byte %d -> %s -> written %r" % (byte, k.text(v), fake.written[:1]))
 check("rgb.brightness: all 256 bytes survive the percentage", bad[:3])
 
+# ------------------------------------------------------------- device lock
+# one aqdctl at a time changes a device
+bad = []
+with core.device_lock(HFN):
+    try:
+        with core.device_lock(HFN, wait=0.2):
+            bad.append("a second lock was granted")
+    except core.Failure as exc:
+        if exc.code != core.EXIT_DEVICE:
+            bad.append("status %r" % exc.code)
+with core.device_lock(HFN, wait=0.2):
+    pass                                    # released again
+check("device lock: a second writer waits, then gives up with status 3", bad)
+
 # Every write above backed up into BACKUPS, never the real data directory.
 core.data_dir = real_data_dir
 shutil.rmtree(BACKUPS)

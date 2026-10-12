@@ -160,6 +160,9 @@ def _main(argv):
         if getattr(args, "quiet", False):
             stack.enter_context(contextlib.redirect_stdout(
                 stack.enter_context(open(os.devnull, "w"))))
+        if hasattr(args, "dry_run"):
+            # It may write: one aqdctl at a time changes this device.
+            stack.enter_context(core.device_lock(serial))
         if getattr(args, "needs_device", True) is not False:
             stack.enter_context(dev)
         args.func(dev, args)

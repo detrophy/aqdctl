@@ -3,6 +3,7 @@ the byte helpers, talking to a device, what happens around a write (backup,
 confirmation, read-back), and the local config, keyed by serial."""
 
 import argparse
+import contextlib
 import datetime
 import errno
 import json
@@ -246,6 +247,33 @@ def _make_dir(directory):
     os.makedirs(directory, exist_ok=True)
     if fresh:
         _give_back(directory)
+
+
+@contextlib.contextmanager
+def device_lock(serial, wait=10.0):
+    """Hold the device for one read-modify-write. A second aqdctl changing the
+    same device waits for the first, so neither writes back a report the other
+    has changed in between."""
+    import fcntl
+    directory = os.path.join(data_dir(), "locks")
+    _make_dir(directory)
+    path = os.path.join(directory, "%s.lock" % serial)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o644)
+    _give_back(path)
+    deadline = time.monotonic() + wait
+    try:
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() > deadline:
+                    fail(EXIT_DEVICE, "Another aqdctl has been changing the device %s "
+                         "for %g s. Nothing written." % (serial, wait))
+                time.sleep(0.1)
+        yield
+    finally:
+        os.close(fd)
 
 
 # ------------------------------------------------------------------ config
